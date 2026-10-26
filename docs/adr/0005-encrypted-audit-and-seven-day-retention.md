@@ -10,6 +10,8 @@ Rollback requires pre-state and operation results to remain available, but syste
 
 Retain full audit and reversal payloads for seven days, then delete them from the active application store and expire their encryption keys when no longer referenced. Encrypt sensitive audit and pre-state payloads at the application layer with an operator-managed key supplied through a mounted secret file; do not store the key in PostgreSQL. Redact access tokens, host credentials, and secret values before logging. Do not store raw conversation prompts or collect product telemetry by default.
 
+The local stdio APT action store uses a separate private 32-byte operator key and writes encrypted records in the MCP user's configuration directory. It uses the same seven-day expiry and deletes expired active records during startup, periodic cleanup, and later actions. The root helper's package allowlist is not stored in the encrypted action record.
+
 The seven-day limit applies to the application's active store. Operator-managed backups may retain older encrypted database pages; document that backup retention must be configured separately. Assess adoption later using direct counts where available and dated, confidence-labeled public proxies such as downloads, deployments, and active issues. Any longer-retention or paid plan requires a later product decision.
 
 ## Alternatives considered

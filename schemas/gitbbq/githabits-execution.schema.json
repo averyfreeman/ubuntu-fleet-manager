@@ -1,0 +1,35 @@
+{
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "action": {
+      "type": "string"
+    },
+    "command": {
+      "type": [
+        "null",
+        "array"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "executed": {
+      "type": "boolean"
+    },
+    "exit_code": {
+      "type": "integer"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "schema_version",
+    "action",
+    "command",
+    "executed",
+    "exit_code"
+  ],
+  "additionalProperties": false
+}

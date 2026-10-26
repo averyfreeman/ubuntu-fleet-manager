@@ -1,0 +1,112 @@
+{
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "version": {
+      "type": "integer"
+    },
+    "profile": {
+      "type": "string"
+    },
+    "branch": {
+      "type": "string"
+    },
+    "versioning": {
+      "type": "string"
+    },
+    "initial_tag": {
+      "type": "string"
+    },
+    "commit_style": {
+      "type": "string"
+    },
+    "semantic_release": {
+      "type": "boolean"
+    },
+    "actions": {
+      "type": "object",
+      "properties": {
+        "init": {
+          "type": "boolean"
+        },
+        "branch": {
+          "type": "boolean"
+        },
+        "stage": {
+          "type": "boolean"
+        },
+        "commit": {
+          "type": "boolean"
+        },
+        "tag": {
+          "type": "boolean"
+        },
+        "remote": {
+          "type": "boolean"
+        },
+        "push": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "init",
+        "branch",
+        "stage",
+        "commit",
+        "tag",
+        "remote",
+        "push"
+      ],
+      "additionalProperties": false
+    },
+    "remote": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "visibility": {
+          "type": "string"
+        },
+        "alias": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "visibility",
+        "alias",
+        "status"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "schema_version",
+    "version",
+    "profile",
+    "branch",
+    "versioning",
+    "initial_tag",
+    "commit_style",
+    "semantic_release",
+    "actions",
+    "remote"
+  ],
+  "additionalProperties": false
+}

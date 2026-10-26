@@ -11,7 +11,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -143,6 +145,60 @@ func TestStdioSystemInfoContract(t *testing.T) {
 	}
 }
 
+func TestSharedStdioContractFixture(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	session := connectStdio(t, ctx, false)
+	defer session.Close()
+
+	listed, err := session.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("list tools: %v", err)
+	}
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "get_system_info", Arguments: map[string]any{}})
+	if err != nil {
+		t.Fatalf("call get_system_info: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("get_system_info returned an MCP tool error: %v", result.Content)
+	}
+	fields := make([]string, 0, len(result.StructuredContent.(map[string]any)))
+	for field := range result.StructuredContent.(map[string]any) {
+		fields = append(fields, field)
+	}
+	slices.Sort(fields)
+	contract := struct {
+		Tools        []*mcp.Tool `json:"tools"`
+		ResultFields []string    `json:"resultFields"`
+	}{Tools: listed.Tools, ResultFields: fields}
+	encoded, err := json.MarshalIndent(contract, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal Go MCP contract: %v", err)
+	}
+	contractPath := filepath.Join("..", "..", "schemas", "mcp-local-stdio-contract.json")
+	if os.Getenv("UFM_UPDATE_MCP_CONTRACT") == "1" {
+		if err := os.WriteFile(contractPath, append(encoded, '\n'), 0o644); err != nil {
+			t.Fatalf("write MCP contract fixture: %v", err)
+		}
+		return
+	}
+	expected, err := os.ReadFile(contractPath)
+	if err != nil {
+		t.Fatalf("read MCP contract fixture (set UFM_UPDATE_MCP_CONTRACT=1 to refresh deliberately): %v", err)
+	}
+	var want, got any
+	if err := json.Unmarshal(expected, &want); err != nil {
+		t.Fatalf("decode MCP contract fixture: %v", err)
+	}
+	if err := json.Unmarshal(encoded, &got); err != nil {
+		t.Fatalf("decode current Go MCP contract: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		formatted, _ := json.MarshalIndent(got, "", "  ")
+		t.Errorf("Go MCP contract differs from shared fixture; set UFM_UPDATE_MCP_CONTRACT=1 to review and refresh it:\n%s", formatted)
+	}
+}
+
 func TestStdioRejectsUnexpectedArgument(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -211,6 +267,9 @@ func TestAgentEnrollCommandReadsPairingCodeFromStdinAndDoesNotPrintCredential(t 
 	defer server.Close()
 
 	configPath := filepath.Join(t.TempDir(), "agent.json")
+	allowedPath := t.TempDir()
+	additionalAllowedPath := t.TempDir()
+	writablePath := t.TempDir()
 	stdinReader, stdinWriter, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("create pairing-code input pipe: %v", err)
@@ -232,6 +291,8 @@ func TestAgentEnrollCommandReadsPairingCodeFromStdinAndDoesNotPrintCredential(t 
 		os.Stdin, os.Stdout = stdinReader, stdoutWriter
 		commandErr = runAgentCommand(context.Background(), []string{
 			"enroll", "--server", server.URL, "--pairing-code-stdin", "--config", configPath,
+			"--allowed-path", allowedPath, "--allowed-path", additionalAllowedPath,
+			"--writable-path", writablePath,
 		})
 	}()
 	_ = stdinReader.Close()
@@ -259,6 +320,12 @@ func TestAgentEnrollCommandReadsPairingCodeFromStdinAndDoesNotPrintCredential(t 
 	}
 	if config.Credential != credential {
 		t.Fatalf("stored credential = %q, want enrollment credential", config.Credential)
+	}
+	if len(config.AllowedPaths) != 2 || config.AllowedPaths[0] != allowedPath || config.AllowedPaths[1] != additionalAllowedPath {
+		t.Fatalf("stored allowed paths = %v, want %q and %q", config.AllowedPaths, allowedPath, additionalAllowedPath)
+	}
+	if len(config.WritablePaths) != 1 || config.WritablePaths[0] != writablePath {
+		t.Fatalf("stored writable paths = %v, want %q", config.WritablePaths, writablePath)
 	}
 }
 

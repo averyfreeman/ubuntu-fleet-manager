@@ -2,6 +2,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,19 +16,30 @@ import (
 	"strings"
 	"time"
 
+	"github.com/averyfreeman/ubuntu-fleet-manager/internal/hostops"
 	"github.com/averyfreeman/ubuntu-fleet-manager/internal/systeminfo"
 )
 
 type Config struct {
-	ServerURL  string `json:"server_url"`
-	HostID     string `json:"host_id"`
-	Credential string `json:"credential"`
+	ServerURL     string                `json:"server_url"`
+	HostID        string                `json:"host_id"`
+	Credential    string                `json:"credential"`
+	AllowedPaths  []string              `json:"allowed_paths,omitempty"`
+	WritablePaths []string              `json:"writable_paths,omitempty"`
+	APTPolicy     hostops.APTPolicy     `json:"apt_policy,omitempty"`
+	CommandPolicy hostops.CommandPolicy `json:"command_policy,omitempty"`
 }
 
 type Client struct {
 	httpClient *http.Client
 	collect    SystemInfoCollector
+	aptRunner  hostops.APTCommandRunner
 }
+
+const (
+	maxAgentConfigBytes     = 16 << 10
+	maxAgentJobPayloadBytes = 2 << 20
+)
 
 type SystemInfoCollector func() (systeminfo.Info, error)
 
@@ -48,18 +60,19 @@ type pollResponse struct {
 }
 
 type agentJob struct {
-	ID             string    `json:"id"`
-	Operation      string    `json:"operation"`
-	LeaseToken     string    `json:"lease_token"`
-	LeaseExpiresAt time.Time `json:"lease_expires_at"`
-	Attempt        int       `json:"attempt"`
+	ID             string          `json:"id"`
+	Operation      string          `json:"operation"`
+	Input          json.RawMessage `json:"input,omitempty"`
+	LeaseToken     string          `json:"lease_token"`
+	LeaseExpiresAt time.Time       `json:"lease_expires_at"`
+	Attempt        int             `json:"attempt"`
 }
 
 type jobResultSubmission struct {
-	JobID      string           `json:"job_id"`
-	LeaseToken string           `json:"lease_token"`
-	Result     *systeminfo.Info `json:"result,omitempty"`
-	Error      string           `json:"error,omitempty"`
+	JobID      string          `json:"job_id"`
+	LeaseToken string          `json:"lease_token"`
+	Result     json.RawMessage `json:"result,omitempty"`
+	Error      string          `json:"error,omitempty"`
 }
 
 func NewClient(client *http.Client) *Client {
@@ -91,6 +104,18 @@ func DefaultConfigPath() (string, error) {
 }
 
 func (c *Client) Enroll(ctx context.Context, serverURL, pairingCode, hostname, osPrettyName, configPath string) (string, error) {
+	return c.EnrollWithAllowedPaths(ctx, serverURL, pairingCode, hostname, osPrettyName, configPath, nil)
+}
+
+func (c *Client) EnrollWithAllowedPaths(ctx context.Context, serverURL, pairingCode, hostname, osPrettyName, configPath string, allowedPaths []string) (string, error) {
+	return c.EnrollWithPathPolicies(ctx, serverURL, pairingCode, hostname, osPrettyName, configPath, allowedPaths, nil)
+}
+
+func (c *Client) EnrollWithPathPolicies(ctx context.Context, serverURL, pairingCode, hostname, osPrettyName, configPath string, allowedPaths, writablePaths []string) (string, error) {
+	return c.EnrollWithAPTPolicy(ctx, serverURL, pairingCode, hostname, osPrettyName, configPath, allowedPaths, writablePaths, hostops.APTPolicy{})
+}
+
+func (c *Client) EnrollWithAPTPolicy(ctx context.Context, serverURL, pairingCode, hostname, osPrettyName, configPath string, allowedPaths, writablePaths []string, aptPolicy hostops.APTPolicy) (string, error) {
 	baseURL, err := parseServerURL(serverURL)
 	if err != nil {
 		return "", err
@@ -103,6 +128,18 @@ func (c *Client) Enroll(ctx context.Context, serverURL, pairingCode, hostname, o
 		if err != nil {
 			return "", err
 		}
+	}
+	allowedPaths, err = hostops.NormalizeAllowedPaths(allowedPaths)
+	if err != nil {
+		return "", err
+	}
+	writablePaths, err = hostops.NormalizeWritablePaths(writablePaths)
+	if err != nil {
+		return "", err
+	}
+	aptPolicy, err = hostops.NormalizeAPTPolicy(aptPolicy)
+	if err != nil {
+		return "", err
 	}
 	encoded, err := json.Marshal(enrollmentRequest{PairingCode: pairingCode, Hostname: hostname, OSPrettyName: osPrettyName})
 	if err != nil {
@@ -129,7 +166,7 @@ func (c *Client) Enroll(ctx context.Context, serverURL, pairingCode, hostname, o
 	if enrollment.HostID == "" || enrollment.Credential == "" {
 		return "", fmt.Errorf("control plane enrollment response is incomplete")
 	}
-	config := Config{ServerURL: strings.TrimRight(serverURL, "/"), HostID: enrollment.HostID, Credential: enrollment.Credential}
+	config := Config{ServerURL: strings.TrimRight(serverURL, "/"), HostID: enrollment.HostID, Credential: enrollment.Credential, AllowedPaths: allowedPaths, WritablePaths: writablePaths, APTPolicy: aptPolicy}
 	if err := SaveConfig(configPath, config); err != nil {
 		return "", err
 	}
@@ -160,7 +197,7 @@ func (c *Client) PollOnce(ctx context.Context, config Config) error {
 		return fmt.Errorf("control plane rejected agent poll (HTTP %d)", response.StatusCode)
 	}
 	var result pollResponse
-	if err := decodeJSON(response.Body, &result); err != nil {
+	if err := decodeJSONLimit(response.Body, &result, maxAgentJobPayloadBytes); err != nil {
 		return fmt.Errorf("read agent poll response: %w", err)
 	}
 	switch result.Status {
@@ -173,23 +210,153 @@ func (c *Client) PollOnce(ctx context.Context, config Config) error {
 		if result.Job == nil || result.Job.ID == "" || result.Job.LeaseToken == "" || result.Job.Operation == "" {
 			return fmt.Errorf("control plane returned an incomplete job lease")
 		}
-		return c.executeJob(ctx, baseURL, config.Credential, *result.Job)
+		return c.executeJob(ctx, baseURL, config, *result.Job)
 	default:
 		return fmt.Errorf("control plane returned an unsupported agent poll response")
 	}
 }
 
-func (c *Client) executeJob(ctx context.Context, baseURL *url.URL, credential string, job agentJob) error {
+func (c *Client) executeJob(ctx context.Context, baseURL *url.URL, config Config, job agentJob) error {
 	submission := jobResultSubmission{JobID: job.ID, LeaseToken: job.LeaseToken}
-	if job.Operation != "get_system_info" {
-		submission.Error = "agent does not support the requested operation"
-	} else {
+	input := job.Input
+	if len(input) == 0 {
+		input = json.RawMessage(`{}`)
+	}
+	switch job.Operation {
+	case hostops.OperationGetSystemInfo:
+		var empty struct{}
+		if err := decodeJobJSON(strings.NewReader(string(input)), &empty); err != nil {
+			submission.Error = "system-info job input is invalid"
+			break
+		}
 		info, err := c.collect()
 		if err != nil {
 			submission.Error = safeAgentError(err)
 		} else {
-			submission.Result = &info
+			submission.Result, err = json.Marshal(info)
+			if err != nil {
+				submission.Error = "system-info result could not be encoded"
+			}
 		}
+	case hostops.OperationListDirectory, hostops.OperationReadFile:
+		var operationInput hostops.PathInput
+		if err := decodeJobJSON(strings.NewReader(string(input)), &operationInput); err != nil {
+			submission.Error = "file operation input is invalid"
+			break
+		}
+		var result any
+		var err error
+		if job.Operation == hostops.OperationListDirectory {
+			result, err = hostops.ListDirectory(operationInput.Path, config.AllowedPaths)
+		} else {
+			result, err = hostops.ReadFile(operationInput.Path, config.AllowedPaths)
+		}
+		if err != nil {
+			submission.Error = safeAgentError(err)
+		} else {
+			submission.Result, err = json.Marshal(result)
+			if err != nil {
+				submission.Error = "file operation result could not be encoded"
+			}
+		}
+	case hostops.OperationSearchPackages:
+		var operationInput hostops.PackageSearchInput
+		if err := decodeJobJSON(strings.NewReader(string(input)), &operationInput); err != nil {
+			submission.Error = "package search input is invalid"
+			break
+		}
+		result, err := hostops.SearchPackages(ctx, operationInput.Query, operationInput.Limit, c.aptRunner)
+		if err != nil {
+			submission.Error = safeAgentError(err)
+		} else {
+			submission.Result, err = json.Marshal(result)
+			if err != nil {
+				submission.Error = "package search result could not be encoded"
+			}
+		}
+	case hostops.OperationWriteFile:
+		var operationInput hostops.WriteFileInput
+		if err := decodeJobJSON(strings.NewReader(string(input)), &operationInput); err != nil {
+			submission.Error = "write-file input is invalid"
+			break
+		}
+		result, err := hostops.WriteFile(operationInput.Path, operationInput.Content, config.WritablePaths)
+		if err != nil {
+			submission.Error = "file write failed; check host writable-path policy, filesystem permissions, and available space"
+		} else {
+			submission.Result, err = json.Marshal(result)
+			if err != nil {
+				submission.Error = "write-file result could not be encoded"
+			}
+		}
+	case hostops.OperationRestoreFile:
+		var operationInput hostops.RestoreFileInput
+		if err := decodeJobJSON(strings.NewReader(string(input)), &operationInput); err != nil {
+			submission.Error = "restore-file input is invalid"
+			break
+		}
+		result, err := hostops.RestoreFile(operationInput, config.WritablePaths)
+		if err != nil {
+			submission.Error = "file restoration failed; exact restoration is unavailable due to host policy or filesystem error"
+		} else {
+			submission.Result, err = json.Marshal(result)
+			if err != nil {
+				submission.Error = "restore-file result could not be encoded"
+			}
+		}
+	case hostops.OperationAPTUpdate, hostops.OperationAPTInstall, hostops.OperationAPTRemove, hostops.OperationAPTUpgrade:
+		actionInput := hostops.APTActionInput{}
+		if job.Operation == hostops.OperationAPTUpdate {
+			var empty struct{}
+			if err := decodeJobJSON(strings.NewReader(string(input)), &empty); err != nil {
+				submission.Error = "APT update input is invalid"
+				break
+			}
+		} else if err := decodeJobJSON(strings.NewReader(string(input)), &actionInput); err != nil {
+			submission.Error = "APT package action input is invalid"
+			break
+		}
+		result, err := hostops.RunAPTAction(ctx, job.Operation, actionInput.Packages, config.APTPolicy, c.aptRunner)
+		if err != nil {
+			submission.Error = "APT action was denied by host package policy or could not run safely"
+		} else {
+			submission.Result, err = json.Marshal(result)
+			if err != nil {
+				submission.Error = "APT action result could not be encoded"
+			}
+		}
+	case hostops.OperationAPTRollback:
+		var rollbackInput hostops.APTRollbackInput
+		if err := decodeJobJSON(strings.NewReader(string(input)), &rollbackInput); err != nil {
+			submission.Error = "APT rollback input is invalid"
+			break
+		}
+		result, err := hostops.RestoreAPTAction(ctx, rollbackInput.Previous, rollbackInput.ExpectedCurrent, config.APTPolicy, c.aptRunner)
+		if err != nil {
+			submission.Error = "APT rollback was denied by host package policy or could not run safely"
+		} else {
+			submission.Result, err = json.Marshal(result)
+			if err != nil {
+				submission.Error = "APT rollback result could not be encoded"
+			}
+		}
+	case hostops.OperationExecuteCommand:
+		var commandInput hostops.CommandInput
+		if err := decodeJobJSON(strings.NewReader(string(input)), &commandInput); err != nil {
+			submission.Error = "command input is invalid"
+			break
+		}
+		result, err := hostops.ExecuteCommand(ctx, config.CommandPolicy, commandInput, nil)
+		if err != nil {
+			submission.Error = "command was denied by host policy or could not complete safely"
+		} else {
+			submission.Result, err = json.Marshal(result)
+			if err != nil {
+				submission.Error = "command result could not be encoded"
+			}
+		}
+	default:
+		submission.Error = "agent does not support the requested operation"
 	}
 	encoded, err := json.Marshal(submission)
 	if err != nil {
@@ -199,7 +366,7 @@ func (c *Client) executeJob(ctx context.Context, baseURL *url.URL, credential st
 	if err != nil {
 		return fmt.Errorf("create agent result request: %w", err)
 	}
-	request.Header.Set("Authorization", "Bearer "+credential)
+	request.Header.Set("Authorization", "Bearer "+config.Credential)
 	request.Header.Set("Content-Type", "application/json")
 	response, err := c.httpClient.Do(request)
 	if err != nil {
@@ -268,11 +435,34 @@ func SaveConfig(path string, config Config) error {
 	if config.HostID == "" || config.Credential == "" {
 		return fmt.Errorf("agent configuration is missing its host identity or credential")
 	}
+	allowedPaths, err := hostops.NormalizeAllowedPaths(config.AllowedPaths)
+	if err != nil {
+		return err
+	}
+	config.AllowedPaths = allowedPaths
+	writablePaths, err := hostops.NormalizeWritablePaths(config.WritablePaths)
+	if err != nil {
+		return err
+	}
+	config.WritablePaths = writablePaths
+	aptPolicy, err := hostops.NormalizeAPTPolicy(config.APTPolicy)
+	if err != nil {
+		return fmt.Errorf("invalid agent APT policy: %w", err)
+	}
+	config.APTPolicy = aptPolicy
+	commandPolicy, err := hostops.NormalizeCommandPolicy(config.CommandPolicy)
+	if err != nil {
+		return fmt.Errorf("invalid agent command policy: %w", err)
+	}
+	config.CommandPolicy = commandPolicy
 	encoded, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode agent configuration")
 	}
 	encoded = append(encoded, '\n')
+	if len(encoded) > maxAgentConfigBytes {
+		return fmt.Errorf("agent configuration exceeds the %d KiB size limit", maxAgentConfigBytes>>10)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create agent configuration directory: %w", err)
 	}
@@ -326,7 +516,7 @@ func LoadConfig(path string) (Config, error) {
 	if info.Mode().Perm()&0o077 != 0 {
 		return Config{}, fmt.Errorf("agent configuration permissions are too broad; set mode 0600")
 	}
-	if info.Size() > 16<<10 {
+	if info.Size() > maxAgentConfigBytes {
 		return Config{}, fmt.Errorf("agent configuration exceeds the 16 KiB size limit")
 	}
 	var config Config
@@ -339,11 +529,45 @@ func LoadConfig(path string) (Config, error) {
 	if config.HostID == "" || config.Credential == "" {
 		return Config{}, fmt.Errorf("agent configuration is missing its host identity or credential")
 	}
+	config.AllowedPaths, err = hostops.NormalizeAllowedPaths(config.AllowedPaths)
+	if err != nil {
+		return Config{}, err
+	}
+	config.WritablePaths, err = hostops.NormalizeWritablePaths(config.WritablePaths)
+	if err != nil {
+		return Config{}, err
+	}
+	config.APTPolicy, err = hostops.NormalizeAPTPolicy(config.APTPolicy)
+	if err != nil {
+		return Config{}, fmt.Errorf("invalid agent APT policy: %w", err)
+	}
+	config.CommandPolicy, err = hostops.NormalizeCommandPolicy(config.CommandPolicy)
+	if err != nil {
+		return Config{}, fmt.Errorf("invalid agent command policy: %w", err)
+	}
 	return config, nil
 }
 
 func decodeJSON(reader io.Reader, destination any) error {
-	decoder := json.NewDecoder(io.LimitReader(reader, 16<<10))
+	return decodeJSONLimit(reader, destination, maxAgentConfigBytes)
+}
+
+func decodeJobJSON(reader io.Reader, destination any) error {
+	return decodeJSONLimit(reader, destination, maxAgentJobPayloadBytes)
+}
+
+func decodeJSONLimit(reader io.Reader, destination any, maxBytes int64) error {
+	if maxBytes <= 0 {
+		return fmt.Errorf("JSON size limit must be greater than zero")
+	}
+	encoded, err := io.ReadAll(io.LimitReader(reader, maxBytes+1))
+	if err != nil {
+		return err
+	}
+	if int64(len(encoded)) > maxBytes {
+		return fmt.Errorf("JSON input exceeds the %d-byte size limit", maxBytes)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {
 		return err

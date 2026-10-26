@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/averyfreeman/ubuntu-fleet-manager/internal/hostops"
 	"github.com/averyfreeman/ubuntu-fleet-manager/internal/systeminfo"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -22,6 +23,10 @@ import (
 var errInvalidPairingCode = errors.New("pairing code is invalid, expired, or already used")
 var errInvalidHostCredential = errors.New("host credential is invalid or revoked")
 var errHostAlreadyEnrolled = errors.New("a host with this name is already active in the pairing-code tenant")
+var errInvalidHostJobResult = errors.New("host operation result is invalid")
+
+const maxAgentRequestBytes = 16 << 10
+const maxAgentResultRequestBytes = 4 << 20
 
 type agentEnrollmentRequest struct {
 	PairingCode  string `json:"pairing_code"`
@@ -35,8 +40,8 @@ type agentEnrollmentResponse struct {
 }
 
 type agentPollResponse struct {
-	Status string              `json:"status"`
-	Job    *systemInfoJobLease `json:"job,omitempty"`
+	Status string        `json:"status"`
+	Job    *hostJobLease `json:"job,omitempty"`
 }
 
 type agentResultRequest struct {
@@ -108,7 +113,7 @@ func (s *Service) pollAgent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "host credential is invalid or revoked", http.StatusUnauthorized)
 		return
 	}
-	job, err := s.store.claimNextSystemInfoJob(r.Context(), credential)
+	job, err := s.store.claimNextHostJob(r.Context(), credential)
 	if errors.Is(err, errInvalidHostCredential) {
 		http.Error(w, "host credential is invalid or revoked", http.StatusUnauthorized)
 		return
@@ -127,12 +132,12 @@ func (s *Service) pollAgent(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) submitAgentResult(w http.ResponseWriter, r *http.Request) {
 	var input agentResultRequest
-	if err := decodeAgentJSON(w, r, &input); err != nil {
+	if err := decodeAgentJSONLimit(w, r, &input, maxAgentResultRequestBytes); err != nil {
 		http.Error(w, "invalid agent result request", http.StatusBadRequest)
 		return
 	}
 	if input.JobID == "" || input.LeaseToken == "" || (input.Error == "") == (len(input.Result) == 0) {
-		http.Error(w, "result request must contain either a system_info result or an error", http.StatusBadRequest)
+		http.Error(w, "result request must contain either a typed host operation result or an error", http.StatusBadRequest)
 		return
 	}
 	if input.Error != "" {
@@ -140,22 +145,23 @@ func (s *Service) submitAgentResult(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "agent error is invalid", http.StatusBadRequest)
 			return
 		}
-	} else if !validSystemInfoResult(input.Result) {
-		http.Error(w, "system-info result is invalid", http.StatusBadRequest)
-		return
 	}
 	credential, ok := bearerCredential(r)
 	if !ok {
 		http.Error(w, "host credential is invalid or revoked", http.StatusUnauthorized)
 		return
 	}
-	err := s.store.completeSystemInfoJob(r.Context(), credential, input.JobID, input.LeaseToken, input.Result, input.Error)
+	err := s.store.completeHostJob(r.Context(), credential, input.JobID, input.LeaseToken, input.Result, input.Error)
 	if errors.Is(err, errInvalidHostCredential) {
 		http.Error(w, "host credential is invalid or revoked", http.StatusUnauthorized)
 		return
 	}
 	if errors.Is(err, errInvalidJobLease) {
 		http.Error(w, "job lease is invalid, expired, or no longer current", http.StatusConflict)
+		return
+	}
+	if errors.Is(err, errInvalidHostJobResult) {
+		http.Error(w, "host operation result is invalid", http.StatusBadRequest)
 		return
 	}
 	if err != nil {
@@ -168,11 +174,15 @@ func (s *Service) submitAgentResult(w http.ResponseWriter, r *http.Request) {
 }
 
 func decodeAgentJSON(w http.ResponseWriter, r *http.Request, destination any) error {
+	return decodeAgentJSONLimit(w, r, destination, maxAgentRequestBytes)
+}
+
+func decodeAgentJSONLimit(w http.ResponseWriter, r *http.Request, destination any, maxBytes int64) error {
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || !strings.EqualFold(mediaType, "application/json") {
 		return fmt.Errorf("content type must be application/json")
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {
@@ -238,6 +248,16 @@ func validSystemInfoResult(encoded json.RawMessage) bool {
 		info.RootFilesystem.FreeBytes <= info.RootFilesystem.TotalBytes &&
 		info.RootFilesystem.AvailableBytes <= info.RootFilesystem.FreeBytes &&
 		!info.CollectedAt.IsZero()
+}
+
+func validHostOperationResult(operation string, input, result json.RawMessage) bool {
+	if len(result) > maxAgentResultRequestBytes {
+		return false
+	}
+	if operation == hostops.OperationGetSystemInfo {
+		return validSystemInfoResult(result)
+	}
+	return hostops.ValidateJobResult(operation, input, result) == nil
 }
 
 func (s *postgresStore) enrollHost(ctx context.Context, input agentEnrollmentRequest) (agentEnrollmentResponse, error) {

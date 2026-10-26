@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/averyfreeman/ubuntu-fleet-manager/internal/mcpserver"
+	"github.com/averyfreeman/ubuntu-fleet-manager/internal/securepayload"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -21,7 +22,8 @@ import (
 var migrationFiles embed.FS
 
 type postgresStore struct {
-	pool *pgxpool.Pool
+	pool   *pgxpool.Pool
+	cipher *securepayload.Cipher
 }
 
 func openPostgresStore(ctx context.Context, databaseURL string) (*postgresStore, error) {
@@ -182,6 +184,7 @@ func (s *postgresStore) removeHost(ctx context.Context, tenantID, hostID string)
 		UPDATE jobs
 		SET status = 'cancelled',
 		    result = NULL,
+		    input = '{}'::jsonb,
 		    error_text = 'host was removed',
 		    completed_at = clock_timestamp(),
 		    lease_expires_at = NULL

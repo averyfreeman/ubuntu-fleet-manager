@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -12,25 +13,60 @@ import (
 )
 
 type Config struct {
-	ListenAddress string
-	DatabaseURL   string
-	OIDCIssuerURL string
-	OIDCAudience  string
-	PublicURL     string
+	ListenAddress         string
+	DatabaseURL           string
+	OIDCIssuerURL         string
+	OIDCAudience          string
+	PublicURL             string
+	FileActionKeyFile     string
+	AllowFileWrites       bool
+	AllowAPTWrites        bool
+	AllowCommandExecution bool
 
 	allowInsecureOIDCTest bool
 }
 
 func LoadConfigFromEnv() (Config, error) {
 	config := Config{
-		ListenAddress: strings.TrimSpace(os.Getenv("LISTEN_ADDR")),
-		DatabaseURL:   strings.TrimSpace(os.Getenv("DATABASE_URL")),
-		OIDCIssuerURL: strings.TrimSpace(os.Getenv("OIDC_ISSUER_URL")),
-		OIDCAudience:  strings.TrimSpace(os.Getenv("OIDC_AUDIENCE")),
-		PublicURL:     strings.TrimSpace(os.Getenv("PUBLIC_URL")),
+		ListenAddress:     strings.TrimSpace(os.Getenv("LISTEN_ADDR")),
+		DatabaseURL:       strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		OIDCIssuerURL:     strings.TrimSpace(os.Getenv("OIDC_ISSUER_URL")),
+		OIDCAudience:      strings.TrimSpace(os.Getenv("OIDC_AUDIENCE")),
+		PublicURL:         strings.TrimSpace(os.Getenv("PUBLIC_URL")),
+		FileActionKeyFile: strings.TrimSpace(os.Getenv("FILE_ACTION_KEY_FILE")),
 	}
 	if config.ListenAddress == "" {
 		config.ListenAddress = ":8080"
+	}
+	if configured := strings.TrimSpace(os.Getenv("ALLOW_FILE_WRITES")); configured != "" {
+		switch strings.ToLower(configured) {
+		case "true":
+			config.AllowFileWrites = true
+		case "false":
+			config.AllowFileWrites = false
+		default:
+			return Config{}, fmt.Errorf("ALLOW_FILE_WRITES must be true or false")
+		}
+	}
+	if configured := strings.TrimSpace(os.Getenv("ALLOW_APT_WRITES")); configured != "" {
+		switch strings.ToLower(configured) {
+		case "true":
+			config.AllowAPTWrites = true
+		case "false":
+			config.AllowAPTWrites = false
+		default:
+			return Config{}, fmt.Errorf("ALLOW_APT_WRITES must be true or false")
+		}
+	}
+	if configured := strings.TrimSpace(os.Getenv("ALLOW_COMMAND_EXECUTION")); configured != "" {
+		switch strings.ToLower(configured) {
+		case "true":
+			config.AllowCommandExecution = true
+		case "false":
+			config.AllowCommandExecution = false
+		default:
+			return Config{}, fmt.Errorf("ALLOW_COMMAND_EXECUTION must be true or false")
+		}
 	}
 	if err := config.Validate(); err != nil {
 		return Config{}, err
@@ -54,6 +90,9 @@ func (c Config) Validate() error {
 	}
 	if err := validateURL("PUBLIC_URL", c.PublicURL, true, false); err != nil {
 		return err
+	}
+	if c.FileActionKeyFile == "" || !filepath.IsAbs(c.FileActionKeyFile) {
+		return fmt.Errorf("FILE_ACTION_KEY_FILE must be an absolute path to the mounted application encryption key")
 	}
 	if c.ListenAddress == "" {
 		return fmt.Errorf("LISTEN_ADDR must not be empty")

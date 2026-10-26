@@ -66,6 +66,7 @@ When work is available, the control plane returns HTTP `200 OK` with one leased 
   "job": {
     "id": "c0c326bc-cf08-4e15-98dc-cf8b5fa8d66d",
     "operation": "get_system_info",
+    "input": {},
     "lease_token": "6a1b4c1e-51c0-4bdd-a993-a72b8d76a624",
     "lease_expires_at": "2026-10-26T12:01:00Z",
     "attempt": 1
@@ -73,7 +74,24 @@ When work is available, the control plane returns HTTP `200 OK` with one leased 
 }
 ```
 
-The only supported operation is `get_system_info`. The agent collects a structured snapshot from its local Linux host and submits it to `POST /agent/result`. It does not interpret the operation as a command and does not invoke a shell. `attempt` starts at 1 and counts lease grants. After a lease expires, the next poll may receive the job again with a new lease token if the associated MCP request is still active. The request's 90-second deadline or caller cancellation cancels the job, so it is not retried after the request ends.
+The supported operations are `get_system_info`, `list_directory`, `read_file`, `search_packages`, `write_file`, `restore_file`, `apt_update`, `apt_install`, `apt_remove`, `apt_upgrade`, `apt_rollback`, and `execute_command`. The `input` object is specific to the operation:
+
+| Operation | Input fields |
+| --- | --- |
+| `get_system_info` | Empty object `{}`. |
+| `list_directory` | `path`: absolute directory path inside the host agent's configured read boundary. |
+| `read_file` | `path`: absolute regular-file path inside the host agent's configured read boundary. |
+| `search_packages` | `query`: literal search text; `limit`: optional maximum result count, default 50, maximum 100. |
+| `write_file` | `path`: absolute path inside the separately configured writable boundary; `content`: UTF-8 text, at most 256 KiB. |
+| `restore_file` | `path`, `previous`, and `expected_current`: authenticated control-plane payload containing captured state and the fingerprint needed for a safe restore. |
+| `apt_update` | Empty object `{}`. The agent package policy and root-owned helper policy must allow `update`. |
+| `apt_install`, `apt_remove`, `apt_upgrade` | `packages`: one to 20 unique Debian package names, each in the agent and root-owned helper allowlists. |
+| `apt_rollback` | `previous` and `expected_current`: authenticated package states captured by the control plane for one rollback action. |
+| `execute_command` | `executable`: exact absolute executable path; `args`: exact argument vector; optional `working_directory`: exact configured directory. The host's `command_policy` must allow the request. |
+
+The agent validates each typed input. `execute_command` passes the configured executable and arguments directly without invoking a shell. Read paths default to the agent user's home directory; write paths, APT operations, and generic commands default to none. Local host configuration can add permitted directories, package operations, and exact command vectors. APT writes call `/usr/local/bin/ubuntu-fleet-manager apt-helper` through non-interactive sudo; the root-owned helper validates the exact argument layout and its independent allowlist before it invokes `/usr/bin/apt-get`. See [Enroll and run a host agent](../how-to/enroll-host-agent.md), [Configure APT package policy](../how-to/configure-apt-policy.md), and [Configure constrained command execution](../how-to/configure-command-policy.md).
+
+`attempt` starts at 1 and counts lease grants. After a lease expires, the next poll may receive the job again with a new lease token if the associated MCP request is still active. The request's 90-second deadline or caller cancellation cancels the job, so it is not retried after the request ends.
 
 ### Errors
 
@@ -85,9 +103,24 @@ The only supported operation is `get_system_info`. The agent collects a structur
 
 ## Submit a job result
 
-`POST /agent/result` accepts a result only from the enrolled host that owns the current lease. The request must use `Content-Type: application/json`, contain one JSON object, and include exactly one of `result` or `error`. The body limit is 16 KiB; unknown fields are rejected.
+`POST /agent/result` accepts a result only from the enrolled host that owns the current lease. The request must use `Content-Type: application/json`, contain one JSON object, and include exactly one of `result` or `error`. The body limit is 4 MiB; unknown fields are rejected. Errors are limited to 4096 bytes. Successful results must match the leased operation's typed schema and requested bounds.
 
-Successful result requests use the `systeminfo.Info` structure returned by `get_system_info`, including OS release, hostname, kernel, architecture, memory, root filesystem, and `collected_at`. For a collection failure or unsupported operation, the agent sends a non-empty `error` string instead.
+Successful result requests use the structure for the leased operation:
+
+- `get_system_info` returns OS release, hostname, kernel, architecture, memory, root filesystem, and `collected_at`.
+- `list_directory` returns `path`, `entries` (maximum 100), and `truncated`; each entry has `name`, `path`, `type`, `size_bytes`, `mode`, `modified_at`, and `is_symlink`.
+- `read_file` returns `path`, UTF-8 `content`, and `size_bytes`; the content limit is 256 KiB.
+- `search_packages` returns the normalized `query`, `packages` (at most the requested limit), and `truncated`; each package has `name` and short `description`. It reads configured indexes and keeps any generated APT cache files in a temporary directory removed after the search.
+- `write_file` returns `path`, `previous`, and `current`. The `previous` state includes prior existence, bytes, and permission bits; it is encrypted before PostgreSQL storage.
+- `restore_file` returns `path`, `restored`, `exact`, and an optional `reason`. If the file no longer matches the managed write or captured prior state, later contents are preserved and exact restoration is reported unavailable.
+- `apt_update` returns its operation and outcome without package state; it has no rollback.
+- `apt_install`, `apt_remove`, and `apt_upgrade` return `operation`, `before`, `after`, `outcome`, `rollback_available`, and an optional safe `reason`. Package states include `name`, `installed`, and `version` when installed.
+- `apt_rollback` returns an `outcome` and one package result per captured package. Each package result contains `name`, `restored`, `exact`, and an optional `reason`.
+- `execute_command` returns `exit_code`, bounded `stdout`, bounded `stderr`, and `output_truncated`. Common credential patterns are redacted before a result is submitted; host policy denials return a generic error without raw command output.
+
+For a collection failure, denied path, unavailable APT index, rejected package policy, unavailable sudo helper, or other operation error, the agent sends a non-empty generic `error` string instead. It does not send raw command output through the result endpoint.
+
+For APT operations, the agent records installed package state with `dpkg-query`. The Ubuntu [`dpkg-query` reference](https://manpages.ubuntu.com/manpages/resolute/man1/dpkg-query.1.html) documents the machine-readable `${binary:Package}`, `${Version}`, and `${db:Status-Abbrev}` fields used by the agent. The control plane encrypts package audit and rollback state for seven days and clears consumed job input and result payloads after it stores that encrypted record.
 
 Example success request:
 
@@ -107,13 +140,43 @@ Example success request:
 }
 ```
 
-On acceptance, the control plane returns HTTP `200 OK`, `Cache-Control: no-store`, and `{"accepted":true}`. Repeating an already accepted submission with the same lease token is idempotent; it does not overwrite the first result. The control plane clears the snapshot after the MCP request retrieves it.
+Example successful file result:
+
+```json
+{
+  "job_id": "c0c326bc-cf08-4e15-98dc-cf8b5fa8d66d",
+  "lease_token": "6a1b4c1e-51c0-4bdd-a993-a72b8d76a624",
+  "result": {
+    "path": "/home/ubuntu-fleet-agent/settings.conf",
+    "content": "mode=safe\n",
+    "size_bytes": 10
+  }
+}
+```
+
+Example successful package search result:
+
+```json
+{
+  "job_id": "c0c326bc-cf08-4e15-98dc-cf8b5fa8d66d",
+  "lease_token": "6a1b4c1e-51c0-4bdd-a993-a72b8d76a624",
+  "result": {
+    "query": "apt",
+    "packages": [{"name": "apt", "description": "command-line package manager"}],
+    "truncated": false
+  }
+}
+```
+
+On acceptance, the control plane returns HTTP `200 OK`, `Cache-Control: no-store`, and `{"accepted":true}`. Repeating an already accepted submission with the same lease token is idempotent; it does not overwrite the first result. The control plane encrypts new job inputs and results with the mounted application key. It clears delivered, failed, and cancelled job payloads, while successful `write_file` results are moved into a separate encrypted reversal record before the job payload is cleared.
 
 | Status | Meaning |
 | --- | --- |
-| `400 Bad Request` | Invalid JSON, oversized body, unknown fields, invalid system-info snapshot, or both/neither result and error supplied. |
+| `400 Bad Request` | Invalid JSON, oversized body, unknown fields, result that does not match the leased operation, invalid error text, or both/neither result and error supplied. |
 | `401 Unauthorized` | Credential is missing, invalid, revoked, or belongs to a removed host. |
 | `409 Conflict` | Job is unknown to this host, cancelled, failed, completed with another lease token, or the submitted lease is stale or expired. Discard this result and continue polling. |
 | `500 Internal Server Error` | The control plane could not persist the result. |
 
-Removing a host revokes its credential and cancels pending or leased jobs plus completed jobs whose snapshots have not been delivered. An MCP `get_host_system_info` request is cancelled when its caller disconnects or the 90-second wait expires. See [Get system information from a managed host](tools/get-host-system-info.md) for the MCP tool behavior and result schema.
+The service removes job records and encrypted reversal records from its active application store after seven days. Cleanup runs at startup and once per minute, so an expired row can remain for up to a minute while the service is running. Backups are operator-managed and may retain older encrypted database pages. See [Control plane configuration](control-plane-configuration.md).
+
+Removing a host revokes its credential and cancels pending or leased jobs plus completed jobs whose results have not been delivered. An MCP host-operation request is cancelled when its caller disconnects or the 90-second wait expires. See [Get system information from a managed host](tools/get-host-system-info.md), [List a directory on a managed host](tools/list-directory.md), [Read a file on a managed host](tools/read-file.md), [Search APT packages on a managed host](tools/search-packages.md), [Write a file on a managed host](tools/write-file.md), and [Roll back a managed file write](tools/rollback-file.md) for MCP tool schemas and results.

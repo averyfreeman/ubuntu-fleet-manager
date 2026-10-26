@@ -2,7 +2,8 @@ name: ubuntu-fleet-manager
 
 services:
   postgres:
-    image: docker.io/library/postgres:18
+    # The multi-platform manifest digest pins PostgreSQL 18 for clean deployments.
+    image: docker.io/library/postgres:18@sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6
     restart: unless-stopped
     environment:
       POSTGRES_DB: ubuntu_fleet_manager
@@ -20,25 +21,30 @@ services:
   control-plane:
     build: .
     image: ubuntu-fleet-manager:local
+    user: ${CONTROL_PLANE_USER:-10001:10001}
     command: ["--transport", "streamable-http"]
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
+    secrets:
+      - file-action-key
     environment:
       LISTEN_ADDR: ${LISTEN_ADDR:-:8080}
       DATABASE_URL: postgres://ubuntu_fleet_manager:${POSTGRES_PASSWORD}@postgres:5432/ubuntu_fleet_manager?sslmode=disable
       OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:?Set OIDC_ISSUER_URL in .env}
       OIDC_AUDIENCE: ${OIDC_AUDIENCE:?Set OIDC_AUDIENCE in .env}
       PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8080}
+      FILE_ACTION_KEY_FILE: /run/secrets/file-action-key
+      ALLOW_FILE_WRITES: ${ALLOW_FILE_WRITES:-false}
+      ALLOW_APT_WRITES: ${ALLOW_APT_WRITES:-false}
+      ALLOW_COMMAND_EXECUTION: ${ALLOW_COMMAND_EXECUTION:-false}
     ports:
-      - "127.0.0.1:8080:8080"
-    healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/readyz"]
-      interval: 10s
-      timeout: 5s
-      retries: 6
-      start_period: 15s
+      - "127.0.0.1:${MCP_HOST_PORT:-8080}:8080"
 
 volumes:
   postgres-data:
+
+secrets:
+  file-action-key:
+    file: ${FILE_ACTION_KEY_SOURCE:-./secrets/file-action-key}

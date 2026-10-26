@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -23,11 +24,12 @@ import (
 
 func TestConfigRequiresSecureProviderAndCompleteDeploymentSettings(t *testing.T) {
 	base := Config{
-		DatabaseURL:   "postgres://ufm:secret@localhost:5432/ufm?sslmode=disable",
-		OIDCIssuerURL: "https://identity.example.test/issuer",
-		OIDCAudience:  "ubuntu-fleet-manager",
-		PublicURL:     "https://fleet.example.test",
-		ListenAddress: ":8080",
+		DatabaseURL:       "postgres://ufm:secret@localhost:5432/ufm?sslmode=disable",
+		OIDCIssuerURL:     "https://identity.example.test/issuer",
+		OIDCAudience:      "ubuntu-fleet-manager",
+		PublicURL:         "https://fleet.example.test",
+		ListenAddress:     ":8080",
+		FileActionKeyFile: testEncryptionKeyFile(t),
 	}
 	if err := base.Validate(); err != nil {
 		t.Fatalf("valid configuration rejected: %v", err)
@@ -52,6 +54,106 @@ func TestConfigRequiresSecureProviderAndCompleteDeploymentSettings(t *testing.T)
 	}
 }
 
+func TestConfigRequiresAbsoluteApplicationEncryptionKeyFile(t *testing.T) {
+	config := Config{
+		DatabaseURL:   "postgres://ufm:secret@localhost:5432/ufm?sslmode=disable",
+		OIDCIssuerURL: "https://identity.example.test/issuer",
+		OIDCAudience:  "ubuntu-fleet-manager",
+		PublicURL:     "https://fleet.example.test",
+		ListenAddress: ":8080",
+	}
+	if err := config.Validate(); err == nil {
+		t.Fatal("configuration without an application encryption key file was accepted")
+	}
+	config.FileActionKeyFile = "relative-key"
+	if err := config.Validate(); err == nil {
+		t.Fatal("configuration with a relative encryption key path was accepted")
+	}
+}
+
+func TestLoadConfigParsesExplicitFileWritePolicy(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://ufm:secret@localhost:5432/ufm?sslmode=disable")
+	t.Setenv("OIDC_ISSUER_URL", "https://identity.example.test/issuer")
+	t.Setenv("OIDC_AUDIENCE", "ubuntu-fleet-manager")
+	t.Setenv("PUBLIC_URL", "https://fleet.example.test")
+	t.Setenv("LISTEN_ADDR", ":8080")
+	t.Setenv("FILE_ACTION_KEY_FILE", testEncryptionKeyFile(t))
+	t.Setenv("ALLOW_FILE_WRITES", "false")
+	config, err := LoadConfigFromEnv()
+	if err != nil || config.AllowFileWrites {
+		t.Fatalf("default denied write policy = %v, error=%v", config.AllowFileWrites, err)
+	}
+	t.Setenv("ALLOW_FILE_WRITES", "true")
+	config, err = LoadConfigFromEnv()
+	if err != nil || !config.AllowFileWrites {
+		t.Fatalf("enabled write policy = %v, error=%v", config.AllowFileWrites, err)
+	}
+	t.Setenv("ALLOW_FILE_WRITES", "sometimes")
+	if _, err := LoadConfigFromEnv(); err == nil {
+		t.Fatal("invalid file-write approval policy was accepted")
+	}
+}
+
+func TestLoadConfigParsesExplicitAPTWritePolicy(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://ufm:secret@localhost:5432/ufm?sslmode=disable")
+	t.Setenv("OIDC_ISSUER_URL", "https://identity.example.test/issuer")
+	t.Setenv("OIDC_AUDIENCE", "ubuntu-fleet-manager")
+	t.Setenv("PUBLIC_URL", "https://fleet.example.test")
+	t.Setenv("LISTEN_ADDR", ":8080")
+	t.Setenv("FILE_ACTION_KEY_FILE", testEncryptionKeyFile(t))
+	t.Setenv("ALLOW_APT_WRITES", "false")
+	config, err := LoadConfigFromEnv()
+	if err != nil || config.AllowAPTWrites {
+		t.Fatalf("default denied APT policy = %v, error=%v", config.AllowAPTWrites, err)
+	}
+	t.Setenv("ALLOW_APT_WRITES", "true")
+	config, err = LoadConfigFromEnv()
+	if err != nil || !config.AllowAPTWrites {
+		t.Fatalf("enabled APT policy = %v, error=%v", config.AllowAPTWrites, err)
+	}
+	t.Setenv("ALLOW_APT_WRITES", "yes")
+	if _, err := LoadConfigFromEnv(); err == nil {
+		t.Fatal("invalid APT write policy was accepted")
+	}
+}
+
+func TestLoadConfigParsesExplicitCommandExecutionPolicy(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://ufm:secret@localhost:5432/ufm?sslmode=disable")
+	t.Setenv("OIDC_ISSUER_URL", "https://identity.example.test/issuer")
+	t.Setenv("OIDC_AUDIENCE", "ubuntu-fleet-manager")
+	t.Setenv("PUBLIC_URL", "https://fleet.example.test")
+	t.Setenv("LISTEN_ADDR", ":8080")
+	t.Setenv("FILE_ACTION_KEY_FILE", testEncryptionKeyFile(t))
+	t.Setenv("ALLOW_COMMAND_EXECUTION", "false")
+	config, err := LoadConfigFromEnv()
+	if err != nil || config.AllowCommandExecution {
+		t.Fatalf("default denied command policy = %v, error=%v", config.AllowCommandExecution, err)
+	}
+	t.Setenv("ALLOW_COMMAND_EXECUTION", "true")
+	config, err = LoadConfigFromEnv()
+	if err != nil || !config.AllowCommandExecution {
+		t.Fatalf("enabled command policy = %v, error=%v", config.AllowCommandExecution, err)
+	}
+	t.Setenv("ALLOW_COMMAND_EXECUTION", "yes")
+	if _, err := LoadConfigFromEnv(); err == nil {
+		t.Fatal("invalid command execution policy was accepted")
+	}
+}
+
+func TestNewFailsClosedWhenApplicationEncryptionKeyIsMissing(t *testing.T) {
+	config := Config{
+		DatabaseURL:       "postgres://ufm:secret@localhost:5432/ufm?sslmode=disable",
+		OIDCIssuerURL:     "https://identity.example.test/issuer",
+		OIDCAudience:      "ubuntu-fleet-manager",
+		PublicURL:         "https://fleet.example.test",
+		ListenAddress:     ":8080",
+		FileActionKeyFile: filepath.Join(t.TempDir(), "missing-key"),
+	}
+	if _, err := New(context.Background(), config); err == nil || !strings.Contains(err.Error(), "encryption key file") {
+		t.Fatalf("New without key error = %v, want fail-closed key error", err)
+	}
+}
+
 func TestControlPlaneAuthenticatesAndIsolatesHostInventory(t *testing.T) {
 	databaseURL := testDatabaseURL(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -70,6 +172,7 @@ func TestControlPlaneAuthenticatesAndIsolatesHostInventory(t *testing.T) {
 		OIDCAudience:          "ubuntu-fleet-manager",
 		PublicURL:             publicURL,
 		ListenAddress:         "127.0.0.1:8080",
+		FileActionKeyFile:     testEncryptionKeyFile(t),
 		allowInsecureOIDCTest: true,
 	}
 	service, err := New(ctx, config)

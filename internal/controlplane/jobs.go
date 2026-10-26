@@ -3,11 +3,11 @@ package controlplane
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
-	"github.com/averyfreeman/ubuntu-fleet-manager/internal/mcpserver"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -15,32 +15,43 @@ import (
 var errHostNotFound = errors.New("host not found in the authenticated personal tenant")
 var errInvalidJobLease = errors.New("job lease is invalid, expired, or no longer current")
 
-type systemInfoJobLease struct {
-	ID             string    `json:"id"`
-	Operation      string    `json:"operation"`
-	LeaseToken     string    `json:"lease_token"`
-	LeaseExpiresAt time.Time `json:"lease_expires_at"`
-	Attempt        int       `json:"attempt"`
+type hostJobTarget struct {
+	HostID      string
+	Hostname    string
+	RequestedAt time.Time
+	ActionID    string
+	ExpiresAt   time.Time
 }
 
-type systemInfoJobState struct {
+type hostJobLease struct {
+	ID             string          `json:"id"`
+	Operation      string          `json:"operation"`
+	Input          json.RawMessage `json:"input"`
+	LeaseToken     string          `json:"lease_token"`
+	LeaseExpiresAt time.Time       `json:"lease_expires_at"`
+	Attempt        int             `json:"attempt"`
+}
+
+type hostJobState struct {
 	Status    string
+	Operation string
+	Input     []byte
 	Result    []byte
 	ErrorText string
 }
 
-func (s *postgresStore) enqueueSystemInfo(ctx context.Context, tenantID, rawHostID string) (mcpserver.HostSystemInfoResult, string, error) {
+func (s *postgresStore) enqueueHostJob(ctx context.Context, tenantID, rawHostID, operation string, input json.RawMessage) (hostJobTarget, string, error) {
 	hostID, err := uuid.Parse(rawHostID)
 	if err != nil {
-		return mcpserver.HostSystemInfoResult{}, "", errHostNotFound
+		return hostJobTarget{}, "", errHostNotFound
 	}
 	transaction, err := s.pool.Begin(ctx)
 	if err != nil {
-		return mcpserver.HostSystemInfoResult{}, "", fmt.Errorf("begin host system-info request: %w", err)
+		return hostJobTarget{}, "", fmt.Errorf("begin host operation request: %w", err)
 	}
 	defer rollbackJobTransaction(transaction)
 
-	var target mcpserver.HostSystemInfoResult
+	var target hostJobTarget
 	err = transaction.QueryRow(ctx, `
 		SELECT id::text, hostname
 		FROM hosts
@@ -48,52 +59,67 @@ func (s *postgresStore) enqueueSystemInfo(ctx context.Context, tenantID, rawHost
 		FOR SHARE
 	`, hostID, tenantID).Scan(&target.HostID, &target.Hostname)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return mcpserver.HostSystemInfoResult{}, "", errHostNotFound
+		return hostJobTarget{}, "", errHostNotFound
 	}
 	if err != nil {
-		return mcpserver.HostSystemInfoResult{}, "", fmt.Errorf("find target host: %w", err)
+		return hostJobTarget{}, "", fmt.Errorf("find target host: %w", err)
 	}
-	var jobID string
+	jobUUID := uuid.New()
+	jobID := jobUUID.String()
+	sealedInput, err := s.sealJobPayload(tenantID, target.HostID, jobID, "input", input)
+	if err != nil {
+		return hostJobTarget{}, "", fmt.Errorf("encrypt host operation input")
+	}
 	err = transaction.QueryRow(ctx, `
-		INSERT INTO jobs (tenant_id, host_id, operation)
-		VALUES ($1::uuid, $2, 'get_system_info')
-		RETURNING id::text, requested_at
-	`, tenantID, hostID).Scan(&jobID, &target.RequestedAt)
+		INSERT INTO jobs (id, tenant_id, host_id, operation, input)
+		VALUES ($1, $2::uuid, $3, $4, $5::jsonb)
+		RETURNING requested_at
+	`, jobUUID, tenantID, hostID, operation, sealedInput).Scan(&target.RequestedAt)
 	if err != nil {
-		return mcpserver.HostSystemInfoResult{}, "", fmt.Errorf("queue host system-info request: %w", err)
+		return hostJobTarget{}, "", fmt.Errorf("queue host operation: %w", err)
 	}
 	if err := transaction.Commit(ctx); err != nil {
-		return mcpserver.HostSystemInfoResult{}, "", fmt.Errorf("commit host system-info request: %w", err)
+		return hostJobTarget{}, "", fmt.Errorf("commit host operation request: %w", err)
 	}
 	return target, jobID, nil
 }
 
-func (s *postgresStore) systemInfoJobState(ctx context.Context, tenantID, hostID, jobID string) (systemInfoJobState, error) {
-	var state systemInfoJobState
+func (s *postgresStore) hostJobState(ctx context.Context, tenantID, hostID, jobID string) (hostJobState, error) {
+	var state hostJobState
 	err := s.pool.QueryRow(ctx, `
-		SELECT status, result, COALESCE(error_text, '')
+		SELECT status, operation, input, result, COALESCE(error_text, '')
 		FROM jobs
 		WHERE id = $1::uuid AND tenant_id = $2::uuid AND host_id = $3::uuid
-	`, jobID, tenantID, hostID).Scan(&state.Status, &state.Result, &state.ErrorText)
+	`, jobID, tenantID, hostID).Scan(&state.Status, &state.Operation, &state.Input, &state.Result, &state.ErrorText)
 	if err != nil {
-		return systemInfoJobState{}, fmt.Errorf("read host system-info job state: %w", err)
+		return hostJobState{}, fmt.Errorf("read host job state: %w", err)
+	}
+	state.Input, _, err = s.openJobPayload(tenantID, hostID, jobID, "input", state.Input)
+	if err != nil {
+		return hostJobState{}, fmt.Errorf("decrypt host operation input")
+	}
+	if len(state.Result) > 0 {
+		state.Result, _, err = s.openJobPayload(tenantID, hostID, jobID, "result", state.Result)
+		if err != nil {
+			return hostJobState{}, fmt.Errorf("decrypt host operation result")
+		}
 	}
 	return state, nil
 }
 
-func (s *postgresStore) clearSystemInfoJobResult(ctx context.Context, tenantID, hostID, jobID string) (bool, error) {
+func (s *postgresStore) clearHostJobResult(ctx context.Context, tenantID, hostID, jobID string) (bool, error) {
 	commandTag, err := s.pool.Exec(ctx, `
-		UPDATE jobs SET result = NULL
+		UPDATE jobs SET result = NULL, input = '{}'::jsonb
 		WHERE id = $1::uuid AND tenant_id = $2::uuid AND host_id = $3::uuid AND status = 'completed'
-		  AND result IS NOT NULL
+		  AND (result IS NOT NULL OR input <> '{}'::jsonb)
 	`, jobID, tenantID, hostID)
 	if err != nil {
-		return false, fmt.Errorf("clear delivered host system-info result: %w", err)
+		return false, fmt.Errorf("clear delivered host job result: %w", err)
 	}
 	return commandTag.RowsAffected() == 1, nil
 }
 
-func (s *postgresStore) cancelSystemInfoJob(ctx context.Context, tenantID, hostID, jobID string) error {
+func (s *postgresStore) cancelHostJob(ctx context.Context, tenantID, hostID, jobID string) error {
 	transaction, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin host job cancellation: %w", err)
@@ -103,6 +129,7 @@ func (s *postgresStore) cancelSystemInfoJob(ctx context.Context, tenantID, hostI
 		UPDATE jobs
 		SET status = 'cancelled',
 		    result = NULL,
+		    input = '{}'::jsonb,
 		    error_text = 'request ended before result delivery',
 		    completed_at = clock_timestamp(),
 		    lease_expires_at = NULL
@@ -112,7 +139,7 @@ func (s *postgresStore) cancelSystemInfoJob(ctx context.Context, tenantID, hostI
 		return fmt.Errorf("cancel pending host job: %w", err)
 	}
 	if _, err := transaction.Exec(ctx, `
-		UPDATE jobs SET result = NULL
+		UPDATE jobs SET result = NULL, input = '{}'::jsonb
 		WHERE id = $1::uuid AND tenant_id = $2::uuid AND host_id = $3::uuid AND status = 'completed'
 	`, jobID, tenantID, hostID); err != nil {
 		return fmt.Errorf("clear undelivered host result: %w", err)
@@ -123,7 +150,7 @@ func (s *postgresStore) cancelSystemInfoJob(ctx context.Context, tenantID, hostI
 	return nil
 }
 
-func (s *postgresStore) claimNextSystemInfoJob(ctx context.Context, credential string) (*systemInfoJobLease, error) {
+func (s *postgresStore) claimNextHostJob(ctx context.Context, credential string) (*hostJobLease, error) {
 	credentialHash := sha256.Sum256([]byte(credential))
 	transaction, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -149,15 +176,16 @@ func (s *postgresStore) claimNextSystemInfoJob(ctx context.Context, credential s
 		return nil, fmt.Errorf("authenticate host poll: %w", err)
 	}
 	var jobID, operation string
+	var input []byte
 	err = transaction.QueryRow(ctx, `
-		SELECT id::text, operation
+		SELECT id::text, operation, input
 		FROM jobs
 		WHERE host_id = $1::uuid AND tenant_id = $2::uuid
 		  AND (status = 'pending' OR (status = 'leased' AND lease_expires_at <= clock_timestamp()))
 		ORDER BY requested_at ASC, id ASC
 		FOR UPDATE SKIP LOCKED
 		LIMIT 1
-	`, hostID, tenantID).Scan(&jobID, &operation)
+	`, hostID, tenantID).Scan(&jobID, &operation, &input)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if err := transaction.Commit(ctx); err != nil {
 			return nil, fmt.Errorf("commit idle host poll: %w", err)
@@ -167,7 +195,7 @@ func (s *postgresStore) claimNextSystemInfoJob(ctx context.Context, credential s
 	if err != nil {
 		return nil, fmt.Errorf("find queued host job: %w", err)
 	}
-	var lease systemInfoJobLease
+	var lease hostJobLease
 	err = transaction.QueryRow(ctx, `
 		UPDATE jobs
 		SET status = 'leased',
@@ -180,13 +208,18 @@ func (s *postgresStore) claimNextSystemInfoJob(ctx context.Context, credential s
 	if err != nil {
 		return nil, fmt.Errorf("lease host job: %w", err)
 	}
+	decryptedInput, _, err := s.openJobPayload(tenantID, hostID, jobID, "input", input)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt leased host operation input")
+	}
 	if err := transaction.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit host job lease: %w", err)
 	}
+	lease.Input = json.RawMessage(decryptedInput)
 	return &lease, nil
 }
 
-func (s *postgresStore) completeSystemInfoJob(ctx context.Context, credential, rawJobID, rawLeaseToken string, result []byte, failure string) error {
+func (s *postgresStore) completeHostJob(ctx context.Context, credential, rawJobID, rawLeaseToken string, result []byte, failure string) error {
 	jobID, err := uuid.Parse(rawJobID)
 	if err != nil {
 		return errInvalidJobLease
@@ -218,13 +251,14 @@ func (s *postgresStore) completeSystemInfoJob(ctx context.Context, credential, r
 		return fmt.Errorf("authenticate host result: %w", err)
 	}
 
-	var status, storedLeaseToken, storedError string
+	var status, operation, storedLeaseToken, storedError string
+	var input []byte
 	err = transaction.QueryRow(ctx, `
-		SELECT status, COALESCE(lease_token::text, ''), COALESCE(error_text, '')
+		SELECT status, operation, input, COALESCE(lease_token::text, ''), COALESCE(error_text, '')
 		FROM jobs
 		WHERE id = $1 AND host_id = $2::uuid AND tenant_id = $3::uuid
 		FOR UPDATE
-	`, jobID, hostID, tenantID).Scan(&status, &storedLeaseToken, &storedError)
+	`, jobID, hostID, tenantID).Scan(&status, &operation, &input, &storedLeaseToken, &storedError)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return errInvalidJobLease
 	}
@@ -240,10 +274,17 @@ func (s *postgresStore) completeSystemInfoJob(ctx context.Context, credential, r
 	if status != "leased" || storedLeaseToken != leaseToken.String() {
 		return errInvalidJobLease
 	}
+	decryptedInput, _, err := s.openJobPayload(tenantID, hostID, jobID.String(), "input", input)
+	if err != nil {
+		return fmt.Errorf("decrypt submitted host operation input")
+	}
+	if failure == "" && !validHostOperationResult(operation, json.RawMessage(decryptedInput), json.RawMessage(result)) {
+		return errInvalidHostJobResult
+	}
 	if failure != "" {
 		commandTag, updateErr := transaction.Exec(ctx, `
 			UPDATE jobs
-			SET status = 'failed', error_text = $2, completed_at = clock_timestamp(), lease_expires_at = NULL
+			SET status = 'failed', input = '{}'::jsonb, result = NULL, error_text = $2, completed_at = clock_timestamp(), lease_expires_at = NULL
 			WHERE id = $1 AND status = 'leased' AND lease_token = $3::uuid AND lease_expires_at > clock_timestamp()
 		`, jobID, failure, leaseToken)
 		err = updateErr
@@ -251,11 +292,15 @@ func (s *postgresStore) completeSystemInfoJob(ctx context.Context, credential, r
 			return errInvalidJobLease
 		}
 	} else {
+		sealedResult, sealErr := s.sealJobPayload(tenantID, hostID, jobID.String(), "result", result)
+		if sealErr != nil {
+			return fmt.Errorf("encrypt host operation result")
+		}
 		commandTag, updateErr := transaction.Exec(ctx, `
 			UPDATE jobs
 			SET status = 'completed', result = $2::jsonb, completed_at = clock_timestamp(), lease_expires_at = NULL
 			WHERE id = $1 AND status = 'leased' AND lease_token = $3::uuid AND lease_expires_at > clock_timestamp()
-		`, jobID, result, leaseToken)
+		`, jobID, sealedResult, leaseToken)
 		err = updateErr
 		if err == nil && commandTag.RowsAffected() != 1 {
 			return errInvalidJobLease
@@ -268,6 +313,24 @@ func (s *postgresStore) completeSystemInfoJob(ctx context.Context, credential, r
 		return fmt.Errorf("commit host job result: %w", err)
 	}
 	return nil
+}
+
+func (s *postgresStore) sealJobPayload(tenantID, hostID, jobID, purpose string, plaintext []byte) ([]byte, error) {
+	if s.cipher == nil {
+		return nil, fmt.Errorf("application encryption is unavailable")
+	}
+	return s.cipher.Seal(plaintext, jobPayloadAssociatedData(tenantID, hostID, jobID, purpose))
+}
+
+func (s *postgresStore) openJobPayload(tenantID, hostID, jobID, purpose string, sealed []byte) ([]byte, bool, error) {
+	if s.cipher == nil {
+		return nil, false, fmt.Errorf("application encryption is unavailable")
+	}
+	return s.cipher.OpenIfSealed(sealed, jobPayloadAssociatedData(tenantID, hostID, jobID, purpose))
+}
+
+func jobPayloadAssociatedData(tenantID, hostID, jobID, purpose string) []byte {
+	return []byte("ubuntu-fleet-manager:job:v1:" + tenantID + ":" + hostID + ":" + jobID + ":" + purpose)
 }
 
 func rollbackJobTransaction(transaction pgx.Tx) {

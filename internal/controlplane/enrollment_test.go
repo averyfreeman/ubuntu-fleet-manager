@@ -33,6 +33,7 @@ func TestPairingEnrollmentPollingAndRevocation(t *testing.T) {
 		OIDCAudience:          "ubuntu-fleet-manager",
 		PublicURL:             "http://" + listener.Addr().String(),
 		ListenAddress:         "127.0.0.1:8080",
+		FileActionKeyFile:     testEncryptionKeyFile(t),
 		allowInsecureOIDCTest: true,
 	}
 	service, err := New(ctx, config)

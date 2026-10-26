@@ -29,6 +29,7 @@ venv/
 ENV/
 env/
 .env
+node_modules/
 
 # IDEs
 .vscode/
@@ -58,6 +59,7 @@ config.json
 .env.local
 .env.production
 secrets.yaml
+secrets/
 credentials.json
 auth.json
 

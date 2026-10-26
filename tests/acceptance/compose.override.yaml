@@ -1,0 +1,9 @@
+services:
+  control-plane:
+    image: ubuntu-fleet-manager:acceptance
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      SSL_CERT_FILE: /run/secrets/oidc-test-ca.crt
+    volumes:
+      - "${UFM_TEST_CA_FILE:?Set UFM_TEST_CA_FILE}:/run/secrets/oidc-test-ca.crt:ro"

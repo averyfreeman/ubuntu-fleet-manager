@@ -14,7 +14,7 @@ The response is MCP structured content with these fields:
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `os` | object | Distribution values read from `/etc/os-release`. |
+| `os` | object | Distribution values read from `/etc/os-release`; minimal container images without that file report an unknown distribution. |
 | `hostname` | string | Hostname returned by the operating system. |
 | `kernel` | object | Kernel name and release. |
 | `architecture` | string | Go architecture name, such as `amd64` or `arm64`. |
@@ -22,7 +22,7 @@ The response is MCP structured content with these fields:
 | `root_filesystem` | object | Capacity and usage for the filesystem containing `/`. |
 | `collected_at` | string | UTC timestamp in RFC 3339 format. |
 
-The `os` object contains `id`, `pretty_name`, and `version_id` strings. It also contains `version_codename` when `/etc/os-release` provides one.
+The `os` object contains `id`, `pretty_name`, and `version_id` strings. It also contains `version_codename` when `/etc/os-release` provides one. If the file is missing in a minimal container image, `id` is `unknown`, `pretty_name` is `Unknown Linux distribution`, and `version_id` is an empty string.
 
 The `kernel` object contains `name` and `release` strings.
 
@@ -66,6 +66,6 @@ The tool returns an MCP tool error if a required system value cannot be read or 
 
 ## Data sources
 
-The implementation reads `/etc/os-release`, the hostname, `uname` information, `/proc/meminfo`, and `statfs` for `/`. Values are collected from the local Linux host; the tool does not make network requests.
+The implementation reads `/etc/os-release` when present, the hostname, `uname` information, `/proc/meminfo`, and `statfs` for `/`. A missing release file is represented as an unknown distribution so minimal images such as the scratch control-plane container can still report the kernel and resource snapshot. Other required collection failures return a tool error. Values are collected from the local Linux runtime; the tool does not make network requests.
 
 For Ubuntu Server administration guidance, see the official [system requirements reference](https://documentation.ubuntu.com/server/reference/installation/system-requirements/) and the [Ubuntu Server documentation](https://documentation.ubuntu.com/server/).

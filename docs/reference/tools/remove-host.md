@@ -14,6 +14,21 @@ The `remove_host` tool is available through authenticated Streamable HTTP. It is
 
 The operation is scoped to the authenticated operator's personal tenant. A host in another tenant cannot be removed with this tool.
 
+## Example
+
+```json
+{"host_id":"c0c326bc-cf08-4e15-98dc-cf8b5fa8d66d"}
+```
+
+Example result:
+
+```json
+{
+  "host_id": "c0c326bc-cf08-4e15-98dc-cf8b5fa8d66d",
+  "removed": true
+}
+```
+
 ## Output
 
 | Field | Type | Description |

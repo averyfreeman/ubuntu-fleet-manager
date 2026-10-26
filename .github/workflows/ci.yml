@@ -83,7 +83,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:18
+        image: docker.io/library/postgres:18@sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: ufm-test-password
@@ -111,6 +111,75 @@ jobs:
       - name: Build Go binaries
         run: go build ./...
 
+  connector-parity:
+    name: Python and Node MCP connector parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go 1.27.3
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.3'
+          check-latest: true
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: connectors/node/package-lock.json
+      - name: Build Go MCP runtime and HTTP contract fixture
+        run: |
+          mkdir -p build
+          GOTOOLCHAIN=go1.27.3 go build -trimpath -o build/ubuntu-fleet-manager ./cmd/ubuntu-fleet-manager
+          GOTOOLCHAIN=go1.27.3 go build -trimpath -o build/contract-server ./tests/contract-server
+      - name: Install Python connector
+        run: uv sync --project connectors/python --locked
+      - name: Install Node connector
+        run: npm ci --prefix connectors/node
+      - name: Test Python MCP integration
+        env:
+          UFM_SERVER_BINARY: ${{ github.workspace }}/build/ubuntu-fleet-manager
+          UFM_HTTP_SERVER_BINARY: ${{ github.workspace }}/build/contract-server
+        run: uv run --project connectors/python --locked python -m unittest discover -s connectors/python/tests -v
+      - name: Test Node MCP integration
+        env:
+          UFM_SERVER_BINARY: ${{ github.workspace }}/build/ubuntu-fleet-manager
+          UFM_HTTP_SERVER_BINARY: ${{ github.workspace }}/build/contract-server
+        run: npm test --prefix connectors/node
+
+  clean-deployment:
+    name: Clean Compose deployment acceptance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go 1.27.3
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.3'
+          check-latest: true
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+      - name: Build the runtime and test OIDC issuer
+        run: |
+          mkdir -p build
+          GOTOOLCHAIN=go1.27.3 go build -trimpath -o build/ubuntu-fleet-manager ./cmd/ubuntu-fleet-manager
+          GOTOOLCHAIN=go1.27.3 go build -trimpath -o build/oidc-fixture ./tests/oidc-fixture
+      - name: Install Python connector
+        run: uv sync --project connectors/python --locked
+      - name: Start a clean image and verify the real deployment flow
+        env:
+          UFM_SERVER_BINARY: ${{ github.workspace }}/build/ubuntu-fleet-manager
+          UFM_OIDC_FIXTURE_BINARY: ${{ github.workspace }}/build/oidc-fixture
+        run: uv run --project connectors/python --locked python tests/acceptance/compose_smoke.py
+
   ubuntu-26-behavior:
     name: Host behavior on Ubuntu 26.04
     runs-on: ubuntu-latest
@@ -118,7 +187,7 @@ jobs:
       image: ubuntu:26.04
     services:
       postgres:
-        image: postgres:18
+        image: docker.io/library/postgres:18@sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: ufm-test-password
@@ -148,7 +217,7 @@ jobs:
     name: Release Readiness
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
-    needs: [test, security-scan, integration-test, go-control-plane, ubuntu-26-behavior]
+    needs: [test, security-scan, integration-test, go-control-plane, connector-parity, clean-deployment, ubuntu-26-behavior]
     steps:
     - uses: actions/checkout@v4
 

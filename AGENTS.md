@@ -1,5 +1,7 @@
 # Agent instructions
 
+Use [`SKILL.md`](SKILL.md) when modifying the Go MCP runtime, connectors, host agent, deployment, or product documentation. It contains the approved local development, deployment, connection, and test workflows.
+
 ## Agent skills
 
 ### Issue tracker

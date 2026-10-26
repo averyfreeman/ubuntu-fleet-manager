@@ -17,6 +17,23 @@ The tool accepts no arguments.
 | `pairing_code` | string | One-time secret to enter on the host agent during enrollment. |
 | `expires_at` | timestamp | UTC expiry time, ten minutes after creation. |
 
+## Example
+
+The tool accepts an empty argument object:
+
+```json
+{}
+```
+
+Example result:
+
+```json
+{
+  "pairing_code": "ufm_pair_REDACTED",
+  "expires_at": "2026-10-26T12:10:00Z"
+}
+```
+
 Each code contains 256 bits of random material. The control plane stores only its SHA-256 hash. It can be consumed once by `POST /agent/enroll`; invalid, expired, and previously consumed codes are rejected. The host is created in the tenant that owns the code. The caller cannot select a tenant in the enrollment request.
 
 Treat the returned code as a secret. Share it only with the host being enrolled, and do not paste it into shell history or a support ticket. The agent accepts the code through standard input so it does not need to appear in process arguments.

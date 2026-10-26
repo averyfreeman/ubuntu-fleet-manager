@@ -1,0 +1,154 @@
+{
+  "tools": [
+    {
+      "annotations": {
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Read OS, kernel, architecture, memory, and root filesystem information from the local Linux host.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "type": "object"
+      },
+      "name": "get_system_info",
+      "outputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "architecture": {
+            "description": "Go architecture name",
+            "type": "string"
+          },
+          "collected_at": {
+            "description": "UTC time when this snapshot was collected",
+            "type": "string"
+          },
+          "hostname": {
+            "description": "system hostname",
+            "type": "string"
+          },
+          "kernel": {
+            "additionalProperties": false,
+            "description": "kernel name and release",
+            "properties": {
+              "name": {
+                "description": "kernel name",
+                "type": "string"
+              },
+              "release": {
+                "description": "kernel release",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "release"
+            ],
+            "type": "object"
+          },
+          "memory": {
+            "additionalProperties": false,
+            "description": "memory capacity",
+            "properties": {
+              "available_bytes": {
+                "description": "estimated memory available to applications in bytes",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "total_bytes": {
+                "description": "physical memory in bytes",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "total_bytes",
+              "available_bytes"
+            ],
+            "type": "object"
+          },
+          "os": {
+            "additionalProperties": false,
+            "description": "operating system release information",
+            "properties": {
+              "id": {
+                "description": "distribution identifier",
+                "type": "string"
+              },
+              "pretty_name": {
+                "description": "human-readable distribution name",
+                "type": "string"
+              },
+              "version_codename": {
+                "description": "distribution codename when available",
+                "type": "string"
+              },
+              "version_id": {
+                "description": "distribution version",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "pretty_name",
+              "version_id"
+            ],
+            "type": "object"
+          },
+          "root_filesystem": {
+            "additionalProperties": false,
+            "description": "root filesystem capacity",
+            "properties": {
+              "available_bytes": {
+                "description": "root filesystem capacity available to the agent user in bytes",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "free_bytes": {
+                "description": "free root filesystem capacity including reserved blocks in bytes",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "total_bytes": {
+                "description": "total root filesystem capacity in bytes",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "used_bytes": {
+                "description": "used root filesystem capacity in bytes",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "total_bytes",
+              "used_bytes",
+              "free_bytes",
+              "available_bytes"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "os",
+          "hostname",
+          "kernel",
+          "architecture",
+          "memory",
+          "root_filesystem",
+          "collected_at"
+        ],
+        "type": "object"
+      }
+    }
+  ],
+  "resultFields": [
+    "architecture",
+    "collected_at",
+    "hostname",
+    "kernel",
+    "memory",
+    "os",
+    "root_filesystem"
+  ]
+}

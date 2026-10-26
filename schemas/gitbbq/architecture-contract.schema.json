@@ -1,0 +1,45 @@
+{
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "revision": {
+      "type": "integer"
+    },
+    "scope": {
+      "type": "string"
+    },
+    "problem": {
+      "type": "string"
+    },
+    "languages": {
+      "type": [
+        "null",
+        "array"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "adr_files": {
+      "type": [
+        "null",
+        "array"
+      ],
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "schema_version",
+    "revision",
+    "scope",
+    "problem",
+    "languages",
+    "adr_files"
+  ],
+  "additionalProperties": false
+}

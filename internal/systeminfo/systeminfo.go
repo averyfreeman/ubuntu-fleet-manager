@@ -4,6 +4,7 @@ package systeminfo
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -48,7 +49,7 @@ type Info struct {
 }
 
 func Collect() (Info, error) {
-	release, err := readOSRelease("/etc/os-release")
+	release, err := readOSReleaseOrUnknown("/etc/os-release")
 	if err != nil {
 		return Info{}, fmt.Errorf("read OS release: %w", err)
 	}
@@ -77,6 +78,14 @@ func Collect() (Info, error) {
 		RootFilesystem: filesystem,
 		CollectedAt:    time.Now().UTC(),
 	}, nil
+}
+
+func readOSReleaseOrUnknown(path string) (OperatingSystem, error) {
+	release, err := readOSRelease(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return OperatingSystem{ID: "unknown", PrettyName: "Unknown Linux distribution"}, nil
+	}
+	return release, err
 }
 
 func readOSRelease(path string) (OperatingSystem, error) {
