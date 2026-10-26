@@ -14,9 +14,9 @@ jobs:
     name: Security Scan
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
-    - uses: astral-sh/setup-uv@v6
+    - uses: astral-sh/setup-uv@v10.3.2
 
     - name: Run Bandit Security Scan
       run: |
@@ -32,7 +32,7 @@ jobs:
         uvx --from safety safety check
 
     - name: Upload Security Reports
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       if: always()
       with:
         name: security-reports
@@ -48,14 +48,14 @@ jobs:
         python-version: ['3.10', '3.11', '3.12', '3.13']
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v7
       with:
         python-version: ${{ matrix.python-version }}
 
-    - uses: astral-sh/setup-uv@v6
+    - uses: astral-sh/setup-uv@v10.3.2
 
     - name: Install package
       run: uv sync --frozen
@@ -71,8 +71,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: [test]
     steps:
-    - uses: actions/checkout@v4
-    - uses: astral-sh/setup-uv@v6
+    - uses: actions/checkout@v7
+    - uses: astral-sh/setup-uv@v10.3.2
       with:
         python-version: '3.12'
     - run: uv tool install .
@@ -98,7 +98,7 @@ jobs:
     env:
       UFM_TEST_DATABASE_URL: postgres://postgres:ufm-test-password@localhost:5432/ufm_test?sslmode=disable
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set up Go 1.27.3
         uses: actions/setup-go@v6
         with:
@@ -115,19 +115,19 @@ jobs:
     name: Python and Node MCP connector parity
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set up Go 1.27.3
         uses: actions/setup-go@v6
         with:
           go-version: '1.27.3'
           check-latest: true
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v10.3.2
       - name: Set up Node.js 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: npm
@@ -156,17 +156,17 @@ jobs:
     name: Clean Compose deployment acceptance
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set up Go 1.27.3
         uses: actions/setup-go@v6
         with:
           go-version: '1.27.3'
           check-latest: true
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v10.3.2
       - name: Build the runtime and test OIDC issuer
         run: |
           mkdir -p build
@@ -204,7 +204,7 @@ jobs:
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl git tar
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set up Go 1.27.3
         uses: actions/setup-go@v6
         with:
@@ -219,7 +219,7 @@ jobs:
     if: github.ref == 'refs/heads/main'
     needs: [test, security-scan, integration-test, go-control-plane, connector-parity, clean-deployment, ubuntu-26-behavior]
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Security scan summary
       run: |
