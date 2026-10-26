@@ -44,7 +44,7 @@ curl --fail http://127.0.0.1:8080/readyz
 
 Configure the client with the public `/mcp` URL. The client follows the resource metadata challenge to discover the authorization server, obtains an access token from the configured provider, then sends it as `Authorization: Bearer <token>`. The provider must issue a token whose audience matches `OIDC_AUDIENCE`.
 
-`get_system_info` reports the Linux system running the control-plane process. `list_hosts` returns only hosts in the authenticated user's personal tenant. Host enrollment is not available yet, so a new tenant's inventory is initially empty.
+`get_system_info` reports the Linux system running the control-plane process. `list_hosts` returns only active hosts in the authenticated user's personal tenant. Create a pairing code and enroll an unprivileged host agent to populate the inventory; see [Enroll and run a host agent](enroll-host-agent.md).
 
 ## Stop the stack
 

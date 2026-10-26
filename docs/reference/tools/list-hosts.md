@@ -42,4 +42,4 @@ Example:
 }
 ```
 
-Hosts are not enrolled by the current release, so the inventory remains empty until host enrollment is implemented.
+Hosts enter the active inventory after an agent redeems a one-time code created by `create_pairing_code`. Removed hosts do not appear in `list_hosts`. See [Enroll and run a host agent](../../how-to/enroll-host-agent.md) to enroll a host.
