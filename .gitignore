@@ -138,5 +138,4 @@ trace_*
 security_report.*
 
 # Potentially proprietary prompt data
-AGENTS.md
 .agents

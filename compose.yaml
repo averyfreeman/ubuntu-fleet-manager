@@ -1,0 +1,44 @@
+name: ubuntu-fleet-manager
+
+services:
+  postgres:
+    image: docker.io/library/postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ubuntu_fleet_manager
+      POSTGRES_USER: ubuntu_fleet_manager
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ubuntu_fleet_manager -d ubuntu_fleet_manager"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  control-plane:
+    build: .
+    image: ubuntu-fleet-manager:local
+    command: ["--transport", "streamable-http"]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      LISTEN_ADDR: ${LISTEN_ADDR:-:8080}
+      DATABASE_URL: postgres://ubuntu_fleet_manager:${POSTGRES_PASSWORD}@postgres:5432/ubuntu_fleet_manager?sslmode=disable
+      OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:?Set OIDC_ISSUER_URL in .env}
+      OIDC_AUDIENCE: ${OIDC_AUDIENCE:?Set OIDC_AUDIENCE in .env}
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8080}
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+volumes:
+  postgres-data:

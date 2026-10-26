@@ -4,9 +4,17 @@ package main
 
 import (
 	"context"
+	"errors"
+	"flag"
 	"fmt"
+	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
+	"github.com/averyfreeman/ubuntu-fleet-manager/internal/controlplane"
+	"github.com/averyfreeman/ubuntu-fleet-manager/internal/mcpserver"
 	"github.com/averyfreeman/ubuntu-fleet-manager/internal/systeminfo"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -14,7 +22,22 @@ import (
 type systemInfoCollector func() (systeminfo.Info, error)
 
 func main() {
-	if err := runStdio(context.Background()); err != nil {
+	transport := flag.String("transport", "stdio", "MCP transport: stdio or streamable-http")
+	flag.Parse()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	var err error
+	switch *transport {
+	case "stdio":
+		err = runStdio(ctx)
+	case "streamable-http":
+		err = runStreamableHTTP(ctx)
+	default:
+		err = fmt.Errorf("unsupported transport %q (choose stdio or streamable-http)", *transport)
+	}
+	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -25,30 +48,46 @@ func runStdio(ctx context.Context) error {
 }
 
 func runStdioWithCollector(ctx context.Context, collect systemInfoCollector) error {
-	return newServer(collect).Run(ctx, &mcp.StdioTransport{})
+	return mcpserver.New(mcpserver.SystemInfoCollector(collect), nil).Run(ctx, &mcp.StdioTransport{})
 }
 
-func newServer(collect systemInfoCollector) *mcp.Server {
-	server := mcp.NewServer(
-		&mcp.Implementation{Name: "ubuntu-fleet-manager", Version: "0.1.0-dev"},
-		nil,
-	)
-	openWorld := false
-	mcp.AddTool[struct{}, systeminfo.Info](
-		server,
-		&mcp.Tool{
-			Name:        "get_system_info",
-			Description: "Read OS, kernel, architecture, memory, and root filesystem information from the local Linux host.",
-			Annotations: &mcp.ToolAnnotations{
-				ReadOnlyHint:   true,
-				IdempotentHint: true,
-				OpenWorldHint:  &openWorld,
-			},
-		},
-		func(_ context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, systeminfo.Info, error) {
-			info, err := collect()
-			return nil, info, err
-		},
-	)
-	return server
+func runStreamableHTTP(ctx context.Context) error {
+	config, err := controlplane.LoadConfigFromEnv()
+	if err != nil {
+		return err
+	}
+	service, err := controlplane.New(ctx, config)
+	if err != nil {
+		return err
+	}
+	defer service.Close()
+
+	server := &http.Server{
+		Addr:              config.ListenAddress,
+		Handler:           service.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	serverErrors := make(chan error, 1)
+	go func() {
+		serverErrors <- server.ListenAndServe()
+	}()
+
+	select {
+	case err := <-serverErrors:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			_ = server.Close()
+			return fmt.Errorf("shut down HTTP server: %w", err)
+		}
+		if err := <-serverErrors; !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
+	}
 }

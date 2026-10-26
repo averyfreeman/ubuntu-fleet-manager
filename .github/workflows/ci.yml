@@ -78,11 +78,44 @@ jobs:
     - run: uv tool install .
     - run: ubuntu-mcp-server --help
 
+  go-control-plane:
+    name: Go MCP and control plane
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ufm-test-password
+          POSTGRES_DB: ufm_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d ufm_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 6
+    env:
+      UFM_TEST_DATABASE_URL: postgres://postgres:ufm-test-password@localhost:5432/ufm_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go 1.27.3
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.3'
+          check-latest: true
+      - name: Test Go MCP and control plane
+        run: go test ./... -count=1
+      - name: Vet Go code
+        run: go vet ./...
+      - name: Build Go binaries
+        run: go build ./...
+
   release-check:
     name: Release Readiness
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
-    needs: [test, security-scan, integration-test]
+    needs: [test, security-scan, integration-test, go-control-plane]
     steps:
     - uses: actions/checkout@v4
 
