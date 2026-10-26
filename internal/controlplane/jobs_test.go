@@ -569,6 +569,45 @@ func TestFileWriteRollbackToolsRequirePolicyAndPersistEncryptedReversal(t *testi
 	}
 }
 
+func TestAPTToolPolicyAndConfirmationAreVisibleThroughMCP(t *testing.T) {
+	aptToolNames := []string{"apt_update", "apt_install", "apt_remove", "apt_upgrade", "rollback_apt_action"}
+
+	defaultHarness := newMCPDiscoveryTestHarness(t, false)
+	defaultTools, err := defaultHarness.session.ListTools(defaultHarness.ctx, nil)
+	if err != nil {
+		t.Fatalf("list tools under default APT policy: %v", err)
+	}
+	for _, name := range aptToolNames {
+		if hasTool(defaultTools.Tools, name) {
+			t.Errorf("APT tool %q is registered while ALLOW_APT_WRITES is false", name)
+		}
+	}
+
+	enabledHarness := newMCPDiscoveryTestHarness(t, true)
+	enabledTools, err := enabledHarness.session.ListTools(enabledHarness.ctx, nil)
+	if err != nil {
+		t.Fatalf("list tools under enabled APT policy: %v", err)
+	}
+	for _, name := range aptToolNames {
+		var matched *mcp.Tool
+		for _, candidate := range enabledTools.Tools {
+			if candidate.Name == name {
+				matched = candidate
+				break
+			}
+		}
+		if matched == nil {
+			t.Fatalf("APT tool %q is missing when ALLOW_APT_WRITES is true; tools=%v", name, toolNames(enabledTools.Tools))
+		}
+		if matched.Annotations == nil || matched.Annotations.ReadOnlyHint || matched.Annotations.DestructiveHint == nil || !*matched.Annotations.DestructiveHint || matched.Annotations.OpenWorldHint == nil || !*matched.Annotations.OpenWorldHint {
+			t.Errorf("APT tool %q annotations = %#v, want mutating, destructive, open-world behavior", name, matched.Annotations)
+		}
+		if !strings.Contains(matched.Description, "per-call human confirmation") {
+			t.Errorf("APT tool %q description does not require per-call HTTP confirmation: %q", name, matched.Description)
+		}
+	}
+}
+
 func TestAPTToolsRequireServerPolicyExposeConfirmationHintsAndPersistRollback(t *testing.T) {
 	defaultHarness := newJobTestHarness(t)
 	defaultTools, err := defaultHarness.sessionA.ListTools(defaultHarness.ctx, nil)
