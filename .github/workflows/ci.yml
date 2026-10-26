@@ -111,11 +111,44 @@ jobs:
       - name: Build Go binaries
         run: go build ./...
 
+  ubuntu-26-behavior:
+    name: Host behavior on Ubuntu 26.04
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:26.04
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ufm-test-password
+          POSTGRES_DB: ufm_test
+        options: >-
+          --health-cmd "pg_isready -U postgres -d ufm_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 6
+    env:
+      UFM_TEST_DATABASE_URL: postgres://postgres:ufm-test-password@postgres:5432/ufm_test?sslmode=disable
+    steps:
+      - name: Install runner prerequisites
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl git tar
+      - uses: actions/checkout@v4
+      - name: Set up Go 1.27.3
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.3'
+          check-latest: true
+      - name: Test Go behavior in Ubuntu 26.04 container
+        run: go test ./... -count=1
+
   release-check:
     name: Release Readiness
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
-    needs: [test, security-scan, integration-test, go-control-plane]
+    needs: [test, security-scan, integration-test, go-control-plane, ubuntu-26-behavior]
     steps:
     - uses: actions/checkout@v4
 

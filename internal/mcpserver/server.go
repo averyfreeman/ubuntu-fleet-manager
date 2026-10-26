@@ -45,7 +45,20 @@ type HostRemoval struct {
 
 type HostRemover func(context.Context, string) (HostRemoval, error)
 
-func New(collect SystemInfoCollector, listHosts HostLister, createPairingCode PairingCodeCreator, removeHost HostRemover) *mcp.Server {
+type HostSystemInfoInput struct {
+	HostID string `json:"host_id" jsonschema:"identifier of the enrolled host to inspect"`
+}
+
+type HostSystemInfoResult struct {
+	HostID      string          `json:"host_id" jsonschema:"identifier of the target host"`
+	Hostname    string          `json:"hostname" jsonschema:"hostname reported during enrollment"`
+	RequestedAt time.Time       `json:"requested_at" jsonschema:"UTC time when the control plane queued the request"`
+	SystemInfo  systeminfo.Info `json:"system_info" jsonschema:"structured snapshot collected by the host agent"`
+}
+
+type HostSystemInfoGetter func(context.Context, HostSystemInfoInput) (HostSystemInfoResult, error)
+
+func New(collect SystemInfoCollector, listHosts HostLister, createPairingCode PairingCodeCreator, removeHost HostRemover, getHostSystemInfo HostSystemInfoGetter) *mcp.Server {
 	server := mcp.NewServer(
 		&mcp.Implementation{Name: "ubuntu-fleet-manager", Version: "0.1.0-dev"},
 		nil,
@@ -125,6 +138,24 @@ func New(collect SystemInfoCollector, listHosts HostLister, createPairingCode Pa
 				HostID string `json:"host_id" jsonschema:"identifier of the managed host to remove"`
 			}) (*mcp.CallToolResult, HostRemoval, error) {
 				result, err := removeHost(ctx, input.HostID)
+				return nil, result, err
+			},
+		)
+	}
+	if getHostSystemInfo != nil {
+		mcp.AddTool[HostSystemInfoInput, HostSystemInfoResult](
+			server,
+			&mcp.Tool{
+				Name:        "get_host_system_info",
+				Description: "Get a fresh system-information snapshot from an enrolled host in your personal tenant. The host must be online and its authenticated agent must poll within 90 seconds.",
+				Annotations: &mcp.ToolAnnotations{
+					ReadOnlyHint:   true,
+					IdempotentHint: true,
+					OpenWorldHint:  &closedWorld,
+				},
+			},
+			func(ctx context.Context, _ *mcp.CallToolRequest, input HostSystemInfoInput) (*mcp.CallToolResult, HostSystemInfoResult, error) {
+				result, err := getHostSystemInfo(ctx, input)
 				return nil, result, err
 			},
 		)

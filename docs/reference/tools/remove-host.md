@@ -21,11 +21,11 @@ The operation is scoped to the authenticated operator's personal tenant. A host 
 | `host_id` | string | Identifier of the removed host. |
 | `removed` | boolean | `true` when the host credential has been revoked. |
 
-The tool marks the host as removed, immediately revokes all credentials for it, and excludes it from subsequent `list_hosts` results. The host record remains in PostgreSQL. A later enrollment may reuse the same hostname and creates a new host identity and credential.
+The tool marks the host as removed, immediately revokes all credentials for it, cancels pending and leased jobs plus completed jobs whose snapshots have not yet been delivered, and excludes it from subsequent `list_hosts` results. The host record remains in PostgreSQL. A later enrollment may reuse the same hostname and creates a new host identity and credential.
 
 ## Effects and limitations
 
-This operation disconnects the host from the control plane. The agent's next poll is rejected with HTTP `401 Unauthorized`. It cannot be undone by that host; enroll it again with a new pairing code if it should return.
+This operation disconnects the host from the control plane. The agent's next poll or result submission is rejected with HTTP `401 Unauthorized`. An MCP request waiting for this host's system information returns an error. It cannot be undone by that host; enroll it again with a new pairing code if it should return.
 
 The tool is destructive and idempotent for a host that remains in the authenticated operator's tenant. It does not stop or remove local processes on the host.
 

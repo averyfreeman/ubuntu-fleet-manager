@@ -40,11 +40,12 @@ The service binds to `127.0.0.1:8080`. Put a TLS reverse proxy in front of it fo
 ## Available tools
 
 - `get_system_info` reads OS release, hostname, kernel, architecture, memory, and root filesystem capacity from the host running the Go MCP server. It accepts no arguments and returns typed structured content. See [Get system information](docs/reference/tools/get-system-info.md).
+- `get_host_system_info` requests a fresh snapshot from one enrolled host in the authenticated operator's personal tenant. It waits up to 90 seconds for the host agent. See [Get system information from a managed host](docs/reference/tools/get-host-system-info.md).
 - `list_hosts` is available over authenticated Streamable HTTP. It returns paginated inventory for the caller's personal tenant. See [List managed hosts](docs/reference/tools/list-hosts.md).
 - `create_pairing_code` creates a one-time code that expires after ten minutes and belongs to the authenticated operator's personal tenant. The code is a secret and appears only in the tool result. See [Create a host pairing code](docs/reference/tools/create-pairing-code.md).
 - `remove_host` removes a host from active inventory and immediately revokes its credential. See [Remove a managed host](docs/reference/tools/remove-host.md).
 
-`get_system_info` and `list_hosts` are read-only. `create_pairing_code` creates enrollment state, and `remove_host` revokes access. The service does not execute host commands. The credential is returned only to the agent during successful enrollment and is not included in MCP results.
+`get_system_info`, `get_host_system_info`, and `list_hosts` are read-only. `create_pairing_code` creates enrollment state, and `remove_host` revokes access. The service does not execute host commands. The credential is returned only to the agent during successful enrollment and is not included in MCP results.
 
 ## Run a host agent
 

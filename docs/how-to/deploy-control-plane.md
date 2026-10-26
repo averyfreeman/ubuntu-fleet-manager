@@ -20,7 +20,7 @@ Set a long, random, URL-safe `POSTGRES_PASSWORD`. It is used for the database us
 
 Set `OIDC_ISSUER_URL` to the exact issuer identifier from the provider's discovery document. Set `OIDC_AUDIENCE` to the audience value that the provider includes in access tokens for Ubuntu Fleet Manager. The token must contain a subject and expiry and must verify against the issuer's published signing keys.
 
-For a local-only deployment, keep `PUBLIC_URL=http://localhost:8080`. For remote clients, set `PUBLIC_URL` to the external HTTPS base URL that the reverse proxy uses, such as `https://fleet.example.com`. Configure the proxy to forward `/mcp`, `/.well-known/oauth-protected-resource/mcp`, `/livez`, and `/readyz` to the control-plane container.
+For a local-only deployment, keep `PUBLIC_URL=http://localhost:8080`. For remote clients and host agents, set `PUBLIC_URL` to the external HTTPS base URL that the reverse proxy uses, such as `https://fleet.example.com`. Configure the proxy to forward `/mcp`, `/.well-known/oauth-protected-resource/mcp`, `/agent/enroll`, `/agent/poll`, `/agent/result`, `/livez`, and `/readyz` to the control-plane container without changing their paths. The agent endpoints do not use the operator's OIDC bearer token: enrollment uses a one-time pairing code, and polling and result submission use the host credential. Configure access logging to omit authorization headers and request bodies for the agent endpoints; see [Host agent API](../reference/host-agent-api.md).
 
 ## Start and check the services
 

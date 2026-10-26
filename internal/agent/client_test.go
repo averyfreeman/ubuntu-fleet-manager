@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/averyfreeman/ubuntu-fleet-manager/internal/systeminfo"
 )
 
 func TestEnrollStoresCredentialPrivatelyAndPollsOutbound(t *testing.T) {
@@ -138,5 +140,118 @@ func TestRunStopsWhenContextIsCanceled(t *testing.T) {
 	cancel()
 	if err := NewClient(nil).Run(ctx, Config{ServerURL: server.URL, HostID: "host-123", Credential: "ufm_host_secret"}, time.Second); err == nil {
 		t.Fatal("agent run returned without observing cancellation")
+	}
+}
+
+func TestPollExecutesTypedSystemInfoJobAndSubmitsStructuredResult(t *testing.T) {
+	const credential = "ufm_host_private-credential"
+	collected := 0
+	snapshot := systeminfo.Info{
+		OS:           systeminfo.OperatingSystem{ID: "ubuntu", PrettyName: "Ubuntu 26.04 LTS", VersionID: "26.04"},
+		Hostname:     "web-01",
+		Kernel:       systeminfo.KernelInfo{Name: "Linux", Release: "6.14-test"},
+		Architecture: "amd64",
+		Memory:       systeminfo.MemoryInfo{TotalBytes: 8 << 30, AvailableBytes: 4 << 30},
+		RootFilesystem: systeminfo.FilesystemInfo{
+			TotalBytes: 100 << 30, UsedBytes: 25 << 30, FreeBytes: 75 << 30, AvailableBytes: 70 << 30,
+		},
+		CollectedAt: time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC),
+	}
+	var submitted struct {
+		JobID      string          `json:"job_id"`
+		LeaseToken string          `json:"lease_token"`
+		Result     systeminfo.Info `json:"result"`
+		Error      string          `json:"error"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+credential {
+			t.Errorf("agent authorization header = %q, want enrolled credential", r.Header.Get("Authorization"))
+		}
+		switch r.URL.Path {
+		case "/agent/poll":
+			_, _ = io.WriteString(w, `{"status":"job","job":{"id":"job-123","operation":"get_system_info","lease_token":"lease-456","lease_expires_at":"2026-10-26T12:01:00Z","attempt":1}}`)
+		case "/agent/result":
+			if err := json.NewDecoder(r.Body).Decode(&submitted); err != nil {
+				t.Errorf("decode submitted job result: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"accepted":true}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClientWithSystemInfoCollector(nil, func() (systeminfo.Info, error) {
+		collected++
+		return snapshot, nil
+	})
+	if err := client.PollOnce(context.Background(), Config{ServerURL: server.URL, HostID: "host-123", Credential: credential}); err != nil {
+		t.Fatalf("poll and execute typed job: %v", err)
+	}
+	if collected != 1 || submitted.JobID != "job-123" || submitted.LeaseToken != "lease-456" || submitted.Error != "" {
+		t.Fatalf("job execution = collected %d times, result %#v", collected, submitted)
+	}
+	if submitted.Result.Hostname != snapshot.Hostname || !submitted.Result.CollectedAt.Equal(snapshot.CollectedAt) {
+		t.Fatalf("submitted snapshot = %#v, want %#v", submitted.Result, snapshot)
+	}
+}
+
+func TestAgentRejectsUnknownOperationWithoutExecutingIt(t *testing.T) {
+	const credential = "ufm_host_private-credential"
+	collected := 0
+	var submitted struct {
+		JobID      string `json:"job_id"`
+		LeaseToken string `json:"lease_token"`
+		Result     any    `json:"result"`
+		Error      string `json:"error"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/agent/poll" {
+			_, _ = io.WriteString(w, `{"status":"job","job":{"id":"job-123","operation":"execute_command","lease_token":"lease-456","lease_expires_at":"2026-10-26T12:01:00Z","attempt":1}}`)
+			return
+		}
+		if r.URL.Path == "/agent/result" {
+			if err := json.NewDecoder(r.Body).Decode(&submitted); err != nil {
+				t.Errorf("decode unsupported-operation result: %v", err)
+			}
+			_, _ = io.WriteString(w, `{"accepted":true}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	client := NewClientWithSystemInfoCollector(nil, func() (systeminfo.Info, error) {
+		collected++
+		return systeminfo.Info{}, nil
+	})
+	if err := client.PollOnce(context.Background(), Config{ServerURL: server.URL, HostID: "host-123", Credential: credential}); err != nil {
+		t.Fatalf("return unsupported operation error: %v", err)
+	}
+	if collected != 0 || submitted.JobID != "job-123" || submitted.LeaseToken != "lease-456" || submitted.Result != nil || submitted.Error == "" {
+		t.Fatalf("unsupported operation was executed or not rejected: collected=%d result=%#v", collected, submitted)
+	}
+}
+
+func TestPollTreatsExpiredJobLeaseAsDiscardedAndKeepsAgentAvailable(t *testing.T) {
+	const credential = "ufm_host_private-credential"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/agent/poll":
+			_, _ = io.WriteString(w, `{"status":"job","job":{"id":"job-123","operation":"get_system_info","lease_token":"lease-456","lease_expires_at":"2026-10-26T12:01:00Z","attempt":1}}`)
+		case "/agent/result":
+			w.WriteHeader(http.StatusConflict)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClientWithSystemInfoCollector(nil, func() (systeminfo.Info, error) {
+		return systeminfo.Info{Hostname: "web-01"}, nil
+	})
+	if err := client.PollOnce(context.Background(), Config{ServerURL: server.URL, HostID: "host-123", Credential: credential}); err != nil {
+		t.Fatalf("poll with expired lease: %v", err)
 	}
 }

@@ -10,6 +10,8 @@ The existing Python server combines MCP transport, host operations, and security
 
 Make Go the sole implementation of MCP tools and host-operation policy. Use the official Model Context Protocol Go SDK, pinning v1.8.0 for the initial implementation and Go 1.27.3 as the current toolchain baseline. Expose the same typed MCP contract over stdio and Streamable HTTP; keep transport code separate from domain operations. Python and Node packages are clients that launch the Go binary over stdio or connect to its MCP HTTP endpoint. They do not duplicate host-operation logic. Do not add a custom REST API.
 
+Keep `get_system_info` as the no-argument local-runtime snapshot on both transports. Expose remote host snapshots as the separate authenticated HTTP tool `get_host_system_info(host_id)`. The target is explicit, and the existing local tool schema remains stable.
+
 The selected SDK supports the 2026-07-28 MCP revision and negotiates supported older revisions; interoperability tests must cover the client revisions used by supported connectors. See the [official Go SDK releases](https://github.com/modelcontextprotocol/go-sdk/releases), [SDK protocol compatibility](https://github.com/modelcontextprotocol/go-sdk), and [Go release history](https://go.dev/doc/devel/release).
 
 ## Alternatives considered

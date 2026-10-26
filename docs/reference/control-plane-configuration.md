@@ -23,10 +23,11 @@ The public service endpoints are:
 | `/livez` | Public | Process liveness check. |
 | `/readyz` | Public | Readiness check that requires a reachable PostgreSQL database. |
 | `/agent/enroll` | One-time pairing code in the request body | Consumes a code and returns one host-scoped credential to the enrolling agent once. See [Host agent API](host-agent-api.md). |
-| `/agent/poll` | Active host credential as a bearer token | Records host liveness and returns an idle response when there is no job to run. See [Host agent API](host-agent-api.md). |
+| `/agent/poll` | Active host credential as a bearer token | Records host liveness and returns either an idle response or one leased typed job. See [Host agent API](host-agent-api.md). |
+| `/agent/result` | Active host credential as a bearer token | Accepts the result or failure for the current host-scoped job lease. See [Host agent API](host-agent-api.md). |
 
-Every authenticated control-plane user can call `get_system_info`. Over Streamable HTTP, that tool reports the Linux system running the shared control plane, not a host from that user's inventory. Grant issuer access only to users trusted with those shared system facts. `list_hosts` remains scoped to the caller's personal tenant.
+Every authenticated control-plane user can call `get_system_info`. Over Streamable HTTP, that tool reports the Linux system running the shared control plane, not a host from that user's inventory. Grant issuer access only to users trusted with those shared system facts. `list_hosts` and `get_host_system_info` are scoped to the caller's personal tenant.
 
-The agent endpoints do not use the operator's OIDC token. They require the high-entropy host credential created during enrollment. The host agent initiates every request over HTTPS; no inbound host port is used. The reference deployment terminates TLS at its reverse proxy before forwarding to the control plane. `/agent/enroll` and `/agent/poll` are public application paths at that proxy, and request logs should not record authorization headers or request bodies.
+The agent endpoints do not use the operator's OIDC token. They require the high-entropy host credential created during enrollment. The host agent initiates every request over HTTPS; no inbound host port is used. The reference deployment terminates TLS at its reverse proxy before forwarding to the control plane. `/agent/enroll`, `/agent/poll`, and `/agent/result` are public application paths at that proxy, and request logs should not record authorization headers or request bodies.
 
 For a Compose deployment, see [Deploy the self-hosted control plane](../how-to/deploy-control-plane.md).

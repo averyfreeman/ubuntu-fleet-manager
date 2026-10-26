@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/averyfreeman/ubuntu-fleet-manager/internal/systeminfo"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -34,7 +35,19 @@ type agentEnrollmentResponse struct {
 }
 
 type agentPollResponse struct {
-	Status string `json:"status"`
+	Status string              `json:"status"`
+	Job    *systemInfoJobLease `json:"job,omitempty"`
+}
+
+type agentResultRequest struct {
+	JobID      string          `json:"job_id"`
+	LeaseToken string          `json:"lease_token"`
+	Result     json.RawMessage `json:"result,omitempty"`
+	Error      string          `json:"error,omitempty"`
+}
+
+type agentResultResponse struct {
+	Accepted bool `json:"accepted"`
 }
 
 func newOpaqueSecret(prefix string) (string, []byte, error) {
@@ -95,7 +108,8 @@ func (s *Service) pollAgent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "host credential is invalid or revoked", http.StatusUnauthorized)
 		return
 	}
-	if err := s.store.touchHost(r.Context(), credential); errors.Is(err, errInvalidHostCredential) {
+	job, err := s.store.claimNextSystemInfoJob(r.Context(), credential)
+	if errors.Is(err, errInvalidHostCredential) {
 		http.Error(w, "host credential is invalid or revoked", http.StatusUnauthorized)
 		return
 	} else if err != nil {
@@ -104,7 +118,53 @@ func (s *Service) pollAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(agentPollResponse{Status: "idle"})
+	if job == nil {
+		_ = json.NewEncoder(w).Encode(agentPollResponse{Status: "idle"})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(agentPollResponse{Status: "job", Job: job})
+}
+
+func (s *Service) submitAgentResult(w http.ResponseWriter, r *http.Request) {
+	var input agentResultRequest
+	if err := decodeAgentJSON(w, r, &input); err != nil {
+		http.Error(w, "invalid agent result request", http.StatusBadRequest)
+		return
+	}
+	if input.JobID == "" || input.LeaseToken == "" || (input.Error == "") == (len(input.Result) == 0) {
+		http.Error(w, "result request must contain either a system_info result or an error", http.StatusBadRequest)
+		return
+	}
+	if input.Error != "" {
+		if !validAgentText(input.Error, 4096) {
+			http.Error(w, "agent error is invalid", http.StatusBadRequest)
+			return
+		}
+	} else if !validSystemInfoResult(input.Result) {
+		http.Error(w, "system-info result is invalid", http.StatusBadRequest)
+		return
+	}
+	credential, ok := bearerCredential(r)
+	if !ok {
+		http.Error(w, "host credential is invalid or revoked", http.StatusUnauthorized)
+		return
+	}
+	err := s.store.completeSystemInfoJob(r.Context(), credential, input.JobID, input.LeaseToken, input.Result, input.Error)
+	if errors.Is(err, errInvalidHostCredential) {
+		http.Error(w, "host credential is invalid or revoked", http.StatusUnauthorized)
+		return
+	}
+	if errors.Is(err, errInvalidJobLease) {
+		http.Error(w, "job lease is invalid, expired, or no longer current", http.StatusConflict)
+		return
+	}
+	if err != nil {
+		http.Error(w, "host job result could not be stored", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(agentResultResponse{Accepted: true})
 }
 
 func decodeAgentJSON(w http.ResponseWriter, r *http.Request, destination any) error {
@@ -160,6 +220,26 @@ func validOpaqueSecretFormat(value, prefix string) bool {
 	return err == nil && len(randomMaterial) == 32
 }
 
+func validSystemInfoResult(encoded json.RawMessage) bool {
+	decoder := json.NewDecoder(strings.NewReader(string(encoded)))
+	decoder.DisallowUnknownFields()
+	var info systeminfo.Info
+	if err := decoder.Decode(&info); err != nil {
+		return false
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return false
+	}
+	return info.OS.ID != "" && info.OS.PrettyName != "" && info.OS.VersionID != "" &&
+		info.Hostname != "" && info.Kernel.Name != "" && info.Kernel.Release != "" &&
+		info.Architecture != "" && info.Memory.TotalBytes > 0 && info.Memory.AvailableBytes <= info.Memory.TotalBytes &&
+		info.RootFilesystem.TotalBytes > 0 && info.RootFilesystem.UsedBytes <= info.RootFilesystem.TotalBytes &&
+		info.RootFilesystem.FreeBytes <= info.RootFilesystem.TotalBytes &&
+		info.RootFilesystem.AvailableBytes <= info.RootFilesystem.FreeBytes &&
+		!info.CollectedAt.IsZero()
+}
+
 func (s *postgresStore) enrollHost(ctx context.Context, input agentEnrollmentRequest) (agentEnrollmentResponse, error) {
 	credential, credentialHash, err := newOpaqueSecret("ufm_host_")
 	if err != nil {
@@ -213,26 +293,4 @@ func (s *postgresStore) enrollHost(ctx context.Context, input agentEnrollmentReq
 		return agentEnrollmentResponse{}, fmt.Errorf("commit host enrollment: %w", err)
 	}
 	return agentEnrollmentResponse{HostID: hostID, Credential: credential}, nil
-}
-
-func (s *postgresStore) touchHost(ctx context.Context, credential string) error {
-	hash := sha256.Sum256([]byte(credential))
-	var hostID string
-	err := s.pool.QueryRow(ctx, `
-		UPDATE hosts AS h
-		SET last_seen_at = now()
-		FROM host_credentials AS c
-		WHERE c.credential_hash = $1
-		  AND c.host_id = h.id
-		  AND c.revoked_at IS NULL
-		  AND h.removed_at IS NULL
-		RETURNING h.id::text
-	`, hash[:]).Scan(&hostID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return errInvalidHostCredential
-	}
-	if err != nil {
-		return fmt.Errorf("update host liveness: %w", err)
-	}
-	return nil
 }

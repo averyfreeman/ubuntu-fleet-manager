@@ -54,7 +54,7 @@ func runStdio(ctx context.Context) error {
 }
 
 func runStdioWithCollector(ctx context.Context, collect systemInfoCollector) error {
-	return mcpserver.New(mcpserver.SystemInfoCollector(collect), nil, nil, nil).Run(ctx, &mcp.StdioTransport{})
+	return mcpserver.New(mcpserver.SystemInfoCollector(collect), nil, nil, nil, nil).Run(ctx, &mcp.StdioTransport{})
 }
 
 func runStreamableHTTP(ctx context.Context) error {

@@ -78,7 +78,7 @@ sudo systemctl enable --now ubuntu-fleet-agent.service
 sudo systemctl status ubuntu-fleet-agent.service
 ```
 
-The agent sends an immediate poll and repeats every 30 seconds. At this stage, the control plane records liveness and returns an idle result. The later job ticket adds work delivery on the same outbound poll path. Check `list_hosts` for the enrolled host and its updated `last_seen_at` value.
+The agent sends an immediate poll and repeats every 30 seconds. The control plane records liveness and returns `idle` when no work is queued. To request a fresh host snapshot, call [`get_host_system_info`](../reference/tools/get-host-system-info.md) with the enrolled host's ID. The control plane delivers the typed job on the existing outbound poll path; the host needs no inbound port.
 
 ## Remove a host
 

@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/averyfreeman/ubuntu-fleet-manager/internal/systeminfo"
 )
 
 type Config struct {
@@ -24,7 +26,10 @@ type Config struct {
 
 type Client struct {
 	httpClient *http.Client
+	collect    SystemInfoCollector
 }
+
+type SystemInfoCollector func() (systeminfo.Info, error)
 
 type enrollmentRequest struct {
 	PairingCode  string `json:"pairing_code"`
@@ -38,10 +43,33 @@ type enrollmentResponse struct {
 }
 
 type pollResponse struct {
-	Status string `json:"status"`
+	Status string    `json:"status"`
+	Job    *agentJob `json:"job,omitempty"`
+}
+
+type agentJob struct {
+	ID             string    `json:"id"`
+	Operation      string    `json:"operation"`
+	LeaseToken     string    `json:"lease_token"`
+	LeaseExpiresAt time.Time `json:"lease_expires_at"`
+	Attempt        int       `json:"attempt"`
+}
+
+type jobResultSubmission struct {
+	JobID      string           `json:"job_id"`
+	LeaseToken string           `json:"lease_token"`
+	Result     *systeminfo.Info `json:"result,omitempty"`
+	Error      string           `json:"error,omitempty"`
 }
 
 func NewClient(client *http.Client) *Client {
+	return NewClientWithSystemInfoCollector(client, systeminfo.Collect)
+}
+
+func NewClientWithSystemInfoCollector(client *http.Client, collect SystemInfoCollector) *Client {
+	if collect == nil {
+		collect = systeminfo.Collect
+	}
 	if client == nil {
 		client = &http.Client{Timeout: 15 * time.Second}
 	} else {
@@ -51,7 +79,7 @@ func NewClient(client *http.Client) *Client {
 	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
-	return &Client{httpClient: client}
+	return &Client{httpClient: client, collect: collect}
 }
 
 func DefaultConfigPath() (string, error) {
@@ -135,10 +163,76 @@ func (c *Client) PollOnce(ctx context.Context, config Config) error {
 	if err := decodeJSON(response.Body, &result); err != nil {
 		return fmt.Errorf("read agent poll response: %w", err)
 	}
-	if result.Status != "idle" {
+	switch result.Status {
+	case "idle":
+		if result.Job != nil {
+			return fmt.Errorf("control plane returned a job with an idle status")
+		}
+		return nil
+	case "job":
+		if result.Job == nil || result.Job.ID == "" || result.Job.LeaseToken == "" || result.Job.Operation == "" {
+			return fmt.Errorf("control plane returned an incomplete job lease")
+		}
+		return c.executeJob(ctx, baseURL, config.Credential, *result.Job)
+	default:
 		return fmt.Errorf("control plane returned an unsupported agent poll response")
 	}
+}
+
+func (c *Client) executeJob(ctx context.Context, baseURL *url.URL, credential string, job agentJob) error {
+	submission := jobResultSubmission{JobID: job.ID, LeaseToken: job.LeaseToken}
+	if job.Operation != "get_system_info" {
+		submission.Error = "agent does not support the requested operation"
+	} else {
+		info, err := c.collect()
+		if err != nil {
+			submission.Error = safeAgentError(err)
+		} else {
+			submission.Result = &info
+		}
+	}
+	encoded, err := json.Marshal(submission)
+	if err != nil {
+		return fmt.Errorf("encode agent result")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL(baseURL, "/agent/result"), strings.NewReader(string(encoded)))
+	if err != nil {
+		return fmt.Errorf("create agent result request: %w", err)
+	}
+	request.Header.Set("Authorization", "Bearer "+credential)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return fmt.Errorf("send agent result request: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusConflict {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 16<<10))
+		return nil
+	}
+	if response.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 16<<10))
+		return fmt.Errorf("control plane rejected agent result (HTTP %d)", response.StatusCode)
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 16<<10))
 	return nil
+}
+
+func safeAgentError(err error) string {
+	message := strings.Map(func(character rune) rune {
+		if character < 0x20 || character == 0x7f {
+			return ' '
+		}
+		return character
+	}, strings.TrimSpace(err.Error()))
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return "system information collection failed"
+	}
+	if len(message) > 4096 {
+		message = message[:4096]
+	}
+	return message
 }
 
 func (c *Client) Run(ctx context.Context, config Config, interval time.Duration) error {

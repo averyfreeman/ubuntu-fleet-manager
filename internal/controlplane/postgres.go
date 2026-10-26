@@ -179,6 +179,19 @@ func (s *postgresStore) removeHost(ctx context.Context, tenantID, hostID string)
 		return mcpserver.HostRemoval{}, fmt.Errorf("mark host as removed: %w", err)
 	}
 	if _, err := transaction.Exec(ctx, `
+		UPDATE jobs
+		SET status = 'cancelled',
+		    result = NULL,
+		    error_text = 'host was removed',
+		    completed_at = clock_timestamp(),
+		    lease_expires_at = NULL
+		WHERE host_id = $1 AND (
+		    status IN ('pending', 'leased') OR (status = 'completed' AND result IS NOT NULL)
+		)
+	`, parsedHostID); err != nil {
+		return mcpserver.HostRemoval{}, fmt.Errorf("cancel removed host jobs: %w", err)
+	}
+	if _, err := transaction.Exec(ctx, `
 		UPDATE host_credentials
 		SET revoked_at = COALESCE(revoked_at, now())
 		WHERE host_id = $1 AND revoked_at IS NULL

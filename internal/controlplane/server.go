@@ -2,6 +2,8 @@ package controlplane
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -58,6 +60,7 @@ func (s *Service) Handler() http.Handler {
 	})
 	mux.HandleFunc("POST /agent/enroll", s.enrollAgent)
 	mux.HandleFunc("POST /agent/poll", s.pollAgent)
+	mux.HandleFunc("POST /agent/result", s.submitAgentResult)
 	mux.Handle(s.config.resourceMetadataPath(), auth.ProtectedResourceMetadataHandler(&oauthex.ProtectedResourceMetadata{
 		Resource:               s.config.resourceURL(),
 		AuthorizationServers:   []string{s.config.OIDCIssuerURL},
@@ -68,7 +71,7 @@ func (s *Service) Handler() http.Handler {
 
 	mcpHandler := mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server {
-			return mcpserver.New(systeminfo.Collect, s.listHosts, s.createPairingCode, s.removeHost)
+			return mcpserver.New(systeminfo.Collect, s.listHosts, s.createPairingCode, s.removeHost, s.getHostSystemInfo)
 		},
 		&mcp.StreamableHTTPOptions{
 			MaxRequestBodyBytes: 1 << 20,
@@ -107,6 +110,11 @@ func (s *Service) ensurePersonalTenant(next http.Handler) http.Handler {
 
 type personalTenantContextKey struct{}
 
+const (
+	systemInfoRequestTimeout      = 90 * time.Second
+	jobCancellationCleanupTimeout = 2 * time.Second
+)
+
 func (s *Service) listHosts(ctx context.Context, input mcpserver.ListHostsInput) (mcpserver.HostPage, error) {
 	tenantID, ok := ctx.Value(personalTenantContextKey{}).(string)
 	if !ok || tenantID == "" {
@@ -129,4 +137,78 @@ func (s *Service) removeHost(ctx context.Context, hostID string) (mcpserver.Host
 		return mcpserver.HostRemoval{}, fmt.Errorf("authenticated personal tenant is unavailable")
 	}
 	return s.store.removeHost(ctx, tenantID, hostID)
+}
+
+func (s *Service) getHostSystemInfo(ctx context.Context, input mcpserver.HostSystemInfoInput) (mcpserver.HostSystemInfoResult, error) {
+	tenantID, ok := ctx.Value(personalTenantContextKey{}).(string)
+	if !ok || tenantID == "" {
+		return mcpserver.HostSystemInfoResult{}, fmt.Errorf("authenticated personal tenant is unavailable")
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, systemInfoRequestTimeout-jobCancellationCleanupTimeout)
+	defer cancel()
+	target, jobID, err := s.store.enqueueSystemInfo(waitCtx, tenantID, input.HostID)
+	if err != nil {
+		if errors.Is(waitCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+			return mcpserver.HostSystemInfoResult{}, fmt.Errorf("host did not return system information within 90 seconds")
+		}
+		return mcpserver.HostSystemInfoResult{}, err
+	}
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		state, err := s.store.systemInfoJobState(waitCtx, tenantID, target.HostID, jobID)
+		if err != nil {
+			s.cancelSystemInfoJob(jobID, tenantID, target.HostID)
+			return mcpserver.HostSystemInfoResult{}, fmt.Errorf("read host system-info job: %w", err)
+		}
+		switch state.Status {
+		case "completed":
+			var info systeminfo.Info
+			if err := json.Unmarshal(state.Result, &info); err != nil {
+				s.cancelSystemInfoJob(jobID, tenantID, target.HostID)
+				return mcpserver.HostSystemInfoResult{}, fmt.Errorf("host agent returned invalid system information")
+			}
+			if info.Hostname == "" || info.OS.PrettyName == "" || info.CollectedAt.IsZero() {
+				s.cancelSystemInfoJob(jobID, tenantID, target.HostID)
+				return mcpserver.HostSystemInfoResult{}, fmt.Errorf("host agent returned incomplete system information")
+			}
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Second)
+			cleared, err := s.store.clearSystemInfoJobResult(cleanupCtx, tenantID, target.HostID, jobID)
+			cleanupCancel()
+			if err != nil {
+				return mcpserver.HostSystemInfoResult{}, fmt.Errorf("clear completed job snapshot: %w", err)
+			}
+			if !cleared {
+				return mcpserver.HostSystemInfoResult{}, fmt.Errorf("host system-info result was cancelled before delivery")
+			}
+			if err := ctx.Err(); err != nil {
+				return mcpserver.HostSystemInfoResult{}, err
+			}
+			target.SystemInfo = info
+			return target, nil
+		case "failed":
+			if state.ErrorText == "" {
+				return mcpserver.HostSystemInfoResult{}, fmt.Errorf("host system-info job failed")
+			}
+			return mcpserver.HostSystemInfoResult{}, fmt.Errorf("host system-info job failed: %s", state.ErrorText)
+		case "cancelled":
+			return mcpserver.HostSystemInfoResult{}, fmt.Errorf("host system-info job was cancelled")
+		}
+
+		select {
+		case <-waitCtx.Done():
+			s.cancelSystemInfoJob(jobID, tenantID, target.HostID)
+			if errors.Is(waitCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+				return mcpserver.HostSystemInfoResult{}, fmt.Errorf("host did not return system information within 90 seconds")
+			}
+			return mcpserver.HostSystemInfoResult{}, waitCtx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func (s *Service) cancelSystemInfoJob(jobID, tenantID, hostID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), jobCancellationCleanupTimeout)
+	defer cancel()
+	_ = s.store.cancelSystemInfoJob(ctx, tenantID, hostID, jobID)
 }
