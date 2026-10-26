@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ubuntu-mcp-server"
+version = "0.2.3"
+description = "Ubuntu system tools for Codex and other MCP clients"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Avery Freeman", email = "avery@unixgreybeard.org" }]
+dependencies = ["mcp>=2.1.1,<3", "psutil>=5.9.0"]
+
+[project.scripts]
+ubuntu-mcp-server = "ubuntu_mcp_server.server:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ubuntu_mcp_server"]
+
+[dependency-groups]
+dev = [
+    "distlib>=0.4.3",
+    "setuptools>=84.0.0",
+    "wheel>=0.48.0",
+]

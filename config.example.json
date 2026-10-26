@@ -1,0 +1,24 @@
+{
+  "server": {
+    "name": "secure-ubuntu-controller",
+    "version": "0.2.3",
+    "description": "Secure Ubuntu MCP Server",
+    "log_level": "INFO"
+  },
+  "security": {
+    "policy_name": "secure",
+    "allowed_paths": [
+      "~/"
+    ],
+    "forbidden_paths": [
+      "/etc",
+      "/root",
+      "/boot",
+      "/sys",
+      "/proc"
+    ],
+    "max_command_timeout": 30,
+    "allow_sudo": false,
+    "audit_actions": true
+  }
+}

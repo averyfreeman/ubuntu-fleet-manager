@@ -1,0 +1,4 @@
+# Deprecated: use pyproject.toml with `uv sync` for new installations.
+# Compatibility only inside a uv-managed environment: `uv pip install -r requirements.txt`.
+mcp>=2.1.1,<3
+psutil>=5.9.0

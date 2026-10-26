@@ -1,0 +1,102 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  schedule:
+    # Run security scans weekly
+    - cron: '0 0 * * 0'
+
+jobs:
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: astral-sh/setup-uv@v6
+
+    - name: Run Bandit Security Scan
+      run: |
+        uvx --from 'bandit==1.9.4' bandit -r ubuntu_mcp_server -f json -o bandit-report.json || true
+        uvx --from 'bandit==1.9.4' bandit -r ubuntu_mcp_server
+
+    - name: Run application security checks
+      run: uv run python -m ubuntu_mcp_server --security-test
+
+    - name: Check Dependencies for Vulnerabilities
+      run: |
+        uvx --from safety safety check --json --output safety-report.json || true
+        uvx --from safety safety check
+
+    - name: Upload Security Reports
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: security-reports
+        path: |
+          bandit-report.json
+          safety-report.json
+
+  test:
+    name: Test Suite
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.11', '3.12', '3.13']
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - uses: astral-sh/setup-uv@v6
+
+    - name: Install package
+      run: uv sync --frozen
+
+    - name: Test MCP protocol and command policies
+      run: uv run python -m unittest discover -s tests -v
+
+    - name: Build distributions
+      run: uv build
+
+  integration-test:
+    name: Installed Package
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+    - uses: actions/checkout@v4
+    - uses: astral-sh/setup-uv@v6
+      with:
+        python-version: '3.12'
+    - run: uv tool install .
+    - run: ubuntu-mcp-server --help
+
+  release-check:
+    name: Release Readiness
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    needs: [test, security-scan, integration-test]
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Security scan summary
+      run: |
+        echo "🔒 Security Scan Summary:"
+        echo "✅ Bandit static analysis completed"
+        echo "✅ Dependency vulnerability scan completed"
+        echo "✅ Security policy tests passed"
+
+    - name: Release readiness report
+      run: |
+        echo "🚀 Release Readiness Report:"
+        echo "✅ All tests passing"
+        echo "✅ Security scans clean"
+        echo "✅ Integration tests passed"
+        echo "Ready for release! 🎉"
