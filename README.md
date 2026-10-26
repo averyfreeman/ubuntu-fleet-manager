@@ -1,6 +1,6 @@
 # Ubuntu Fleet Manager
 
-Ubuntu Fleet Manager is an early-stage, self-hosted MCP service for administering Ubuntu hosts. The Go runtime exposes local system information over MCP stdio and an authenticated Streamable HTTP control plane with a tenant-scoped host inventory. Host enrollment and host administration tools are planned work and are not available yet.
+Ubuntu Fleet Manager is an early-stage, self-hosted MCP service for administering Ubuntu hosts. The Go runtime exposes local system information over MCP stdio and an authenticated Streamable HTTP control plane with a tenant-scoped host inventory, one-time host enrollment, and outbound agent liveness polling.
 
 The repository retains the original Python server while the Go runtime and independent connector packages are developed. The current Python package documentation describes that legacy implementation; use the Go instructions below to run the new runtime.
 
@@ -35,14 +35,20 @@ docker compose up --build --detach
 docker compose ps
 ```
 
-The service binds to `127.0.0.1:8080`. Put a TLS reverse proxy in front of it for remote access and set `PUBLIC_URL` to the external HTTPS base URL before starting the stack. See [Deploy the self-hosted control plane](docs/how-to/deploy-control-plane.md) and [Control plane configuration](docs/reference/control-plane-configuration.md) for the required settings and readiness endpoint.
+The service binds to `127.0.0.1:8080`. Put a TLS reverse proxy in front of it for remote access and set `PUBLIC_URL` to the external HTTPS base URL before starting the stack. See [Deploy the self-hosted control plane](docs/how-to/deploy-control-plane.md) and [Control plane configuration](docs/reference/control-plane-configuration.md) for the required settings, agent endpoints, and readiness endpoint.
 
 ## Available tools
 
 - `get_system_info` reads OS release, hostname, kernel, architecture, memory, and root filesystem capacity from the host running the Go MCP server. It accepts no arguments and returns typed structured content. See [Get system information](docs/reference/tools/get-system-info.md).
 - `list_hosts` is available over authenticated Streamable HTTP. It returns paginated inventory for the caller's personal tenant. See [List managed hosts](docs/reference/tools/list-hosts.md).
+- `create_pairing_code` creates a one-time code that expires after ten minutes and belongs to the authenticated operator's personal tenant. The code is a secret and appears only in the tool result. See [Create a host pairing code](docs/reference/tools/create-pairing-code.md).
+- `remove_host` removes a host from active inventory and immediately revokes its credential. See [Remove a managed host](docs/reference/tools/remove-host.md).
 
-Both tools are read-only. The service does not execute commands or return credentials.
+`get_system_info` and `list_hosts` are read-only. `create_pairing_code` creates enrollment state, and `remove_host` revokes access. The service does not execute host commands. The credential is returned only to the agent during successful enrollment and is not included in MCP results.
+
+## Run a host agent
+
+Build or install the Go binary on the Ubuntu host, then enroll and run it as an unprivileged account. The enrollment guide shows how to pass the pairing code through standard input, store the credential with mode `0600`, and configure a systemd service. See [Enroll and run a host agent](docs/how-to/enroll-host-agent.md).
 
 ## Development
 

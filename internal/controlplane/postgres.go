@@ -133,6 +133,64 @@ func (s *postgresStore) ensureTenant(ctx context.Context, issuer, subject string
 	return tenantID, nil
 }
 
+func (s *postgresStore) createPairingCode(ctx context.Context, tenantID string) (mcpserver.PairingCode, error) {
+	code, codeHash, err := newOpaqueSecret("ufm_pair_")
+	if err != nil {
+		return mcpserver.PairingCode{}, err
+	}
+	var expiresAt time.Time
+	err = s.pool.QueryRow(ctx, `
+		INSERT INTO pairing_codes (tenant_id, code_hash, expires_at)
+		VALUES ($1::uuid, $2, now() + interval '10 minutes')
+		RETURNING expires_at
+	`, tenantID, codeHash[:]).Scan(&expiresAt)
+	if err != nil {
+		return mcpserver.PairingCode{}, fmt.Errorf("store pairing code: %w", err)
+	}
+	return mcpserver.PairingCode{Code: code, ExpiresAt: expiresAt.UTC()}, nil
+}
+
+func (s *postgresStore) removeHost(ctx context.Context, tenantID, hostID string) (mcpserver.HostRemoval, error) {
+	parsedHostID, err := uuid.Parse(hostID)
+	if err != nil {
+		return mcpserver.HostRemoval{}, fmt.Errorf("host identifier is invalid")
+	}
+	transaction, err := s.pool.Begin(ctx)
+	if err != nil {
+		return mcpserver.HostRemoval{}, fmt.Errorf("begin host removal: %w", err)
+	}
+	defer func() {
+		rollbackCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = transaction.Rollback(rollbackCtx)
+	}()
+
+	var removedHostID string
+	err = transaction.QueryRow(ctx, `
+		UPDATE hosts
+		SET removed_at = COALESCE(removed_at, now())
+		WHERE id = $1 AND tenant_id = $2::uuid
+		RETURNING id::text
+	`, parsedHostID, tenantID).Scan(&removedHostID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return mcpserver.HostRemoval{}, fmt.Errorf("host not found in the authenticated personal tenant")
+	}
+	if err != nil {
+		return mcpserver.HostRemoval{}, fmt.Errorf("mark host as removed: %w", err)
+	}
+	if _, err := transaction.Exec(ctx, `
+		UPDATE host_credentials
+		SET revoked_at = COALESCE(revoked_at, now())
+		WHERE host_id = $1 AND revoked_at IS NULL
+	`, parsedHostID); err != nil {
+		return mcpserver.HostRemoval{}, fmt.Errorf("revoke host credential: %w", err)
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return mcpserver.HostRemoval{}, fmt.Errorf("commit host removal: %w", err)
+	}
+	return mcpserver.HostRemoval{HostID: removedHostID, Removed: true}, nil
+}
+
 func (s *postgresStore) listHosts(ctx context.Context, tenantID string, input mcpserver.ListHostsInput) (mcpserver.HostPage, error) {
 	limit := input.Limit
 	if limit == 0 {
@@ -167,7 +225,7 @@ func (s *postgresStore) listHosts(ctx context.Context, tenantID string, input mc
 	rows, err := s.pool.Query(ctx, `
 		SELECT id::text, hostname, os_pretty_name, enrolled_at, last_seen_at
 		FROM hosts
-		WHERE tenant_id = $1::uuid
+		WHERE tenant_id = $1::uuid AND removed_at IS NULL
 		  AND ($2::timestamptz IS NULL OR (enrolled_at, id) > ($2::timestamptz, $3::uuid))
 		ORDER BY enrolled_at ASC, id ASC
 		LIMIT $4

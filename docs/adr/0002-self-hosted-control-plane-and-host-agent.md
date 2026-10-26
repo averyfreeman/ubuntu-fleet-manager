@@ -8,7 +8,7 @@ The v0.1 proof of concept is operated by users on their own infrastructure. Host
 
 ## Decision
 
-The operator runs the Go control plane and PostgreSQL in a portable container deployment, and runs one unprivileged host agent on each managed host. Agents initiate outbound HTTPS long-poll requests to receive leased jobs and return results. No inbound host port is required. PostgreSQL stores durable state and the job queue; do not add a separate broker until measured usage justifies it. The v0.1 service is self-hosted; cloud control-plane hosting, subscriptions, and public directory submission are future work.
+The operator runs the Go control plane and PostgreSQL in a portable container deployment, and runs one unprivileged host agent on each managed host. Agents initiate outbound HTTPS polls to receive leased jobs and return results. No inbound host port is required. Until job delivery is implemented, `POST /agent/poll` records `last_seen_at` and returns an idle result; the same authenticated path is extended by the job ticket. PostgreSQL stores durable state and the job queue; do not add a separate broker until measured usage justifies it. The v0.1 service is self-hosted; cloud control-plane hosting, subscriptions, and public directory submission are future work.
 
 ## Alternatives considered
 

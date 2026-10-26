@@ -5,13 +5,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/averyfreeman/ubuntu-fleet-manager/internal/agent"
 	"github.com/averyfreeman/ubuntu-fleet-manager/internal/systeminfo"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -181,6 +186,79 @@ func TestStdioReportsCollectionFailure(t *testing.T) {
 	}
 	if !strings.Contains(textContent.Text, "system information unavailable") {
 		t.Errorf("collection failure content = %q, want the collection error", textContent.Text)
+	}
+}
+
+func TestAgentEnrollCommandReadsPairingCodeFromStdinAndDoesNotPrintCredential(t *testing.T) {
+	const pairingCode = "ufm_pair_private-code"
+	const credential = "ufm_host_private-credential"
+	var pairingCodeReceived string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/agent/enroll" || r.Method != http.MethodPost {
+			t.Errorf("enrollment request = %s %s, want POST /agent/enroll", r.Method, r.URL.Path)
+		}
+		var request struct {
+			PairingCode string `json:"pairing_code"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode enrollment request: %v", err)
+		}
+		pairingCodeReceived = request.PairingCode
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"host_id":"host-cli-test","credential":"`+credential+`"}`)
+	}))
+	defer server.Close()
+
+	configPath := filepath.Join(t.TempDir(), "agent.json")
+	stdinReader, stdinWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create pairing-code input pipe: %v", err)
+	}
+	if _, err := io.WriteString(stdinWriter, pairingCode+"\n"); err != nil {
+		t.Fatalf("write pairing code: %v", err)
+	}
+	_ = stdinWriter.Close()
+	stdoutReader, stdoutWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create command output pipe: %v", err)
+	}
+	originalStdin, originalStdout := os.Stdin, os.Stdout
+	var commandErr error
+	func() {
+		defer func() {
+			os.Stdin, os.Stdout = originalStdin, originalStdout
+		}()
+		os.Stdin, os.Stdout = stdinReader, stdoutWriter
+		commandErr = runAgentCommand(context.Background(), []string{
+			"enroll", "--server", server.URL, "--pairing-code-stdin", "--config", configPath,
+		})
+	}()
+	_ = stdinReader.Close()
+	_ = stdoutWriter.Close()
+	output, err := io.ReadAll(stdoutReader)
+	_ = stdoutReader.Close()
+	if err != nil {
+		t.Fatalf("read command output: %v", err)
+	}
+	if commandErr != nil {
+		t.Fatalf("run agent enroll command: %v", commandErr)
+	}
+	if pairingCodeReceived != pairingCode {
+		t.Fatalf("pairing code received = %q, want stdin value", pairingCodeReceived)
+	}
+	if strings.Contains(string(output), pairingCode) || strings.Contains(string(output), credential) {
+		t.Fatalf("enrollment command output exposed a secret: %s", output)
+	}
+	if !strings.Contains(string(output), "host-cli-test") {
+		t.Fatalf("enrollment output = %q, want host identifier", output)
+	}
+	config, err := agent.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("load enrolled agent config: %v", err)
+	}
+	if config.Credential != credential {
+		t.Fatalf("stored credential = %q, want enrollment credential", config.Credential)
 	}
 }
 

@@ -56,6 +56,8 @@ func (s *Service) Handler() http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ready\n"))
 	})
+	mux.HandleFunc("POST /agent/enroll", s.enrollAgent)
+	mux.HandleFunc("POST /agent/poll", s.pollAgent)
 	mux.Handle(s.config.resourceMetadataPath(), auth.ProtectedResourceMetadataHandler(&oauthex.ProtectedResourceMetadata{
 		Resource:               s.config.resourceURL(),
 		AuthorizationServers:   []string{s.config.OIDCIssuerURL},
@@ -66,7 +68,7 @@ func (s *Service) Handler() http.Handler {
 
 	mcpHandler := mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server {
-			return mcpserver.New(systeminfo.Collect, s.listHosts)
+			return mcpserver.New(systeminfo.Collect, s.listHosts, s.createPairingCode, s.removeHost)
 		},
 		&mcp.StreamableHTTPOptions{
 			MaxRequestBodyBytes: 1 << 20,
@@ -111,4 +113,20 @@ func (s *Service) listHosts(ctx context.Context, input mcpserver.ListHostsInput)
 		return mcpserver.HostPage{}, fmt.Errorf("authenticated personal tenant is unavailable")
 	}
 	return s.store.listHosts(ctx, tenantID, input)
+}
+
+func (s *Service) createPairingCode(ctx context.Context) (mcpserver.PairingCode, error) {
+	tenantID, ok := ctx.Value(personalTenantContextKey{}).(string)
+	if !ok || tenantID == "" {
+		return mcpserver.PairingCode{}, fmt.Errorf("authenticated personal tenant is unavailable")
+	}
+	return s.store.createPairingCode(ctx, tenantID)
+}
+
+func (s *Service) removeHost(ctx context.Context, hostID string) (mcpserver.HostRemoval, error) {
+	tenantID, ok := ctx.Value(personalTenantContextKey{}).(string)
+	if !ok || tenantID == "" {
+		return mcpserver.HostRemoval{}, fmt.Errorf("authenticated personal tenant is unavailable")
+	}
+	return s.store.removeHost(ctx, tenantID, hostID)
 }
